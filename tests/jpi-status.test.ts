@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
-  getStatusLineConfigPath,
+  createDefaultStatusLineConfig,
+  createStatusConfig,
   loadStatusLineConfig,
-  parseStatusLineConfigText,
 } from "../extensions/jpi-status/config.ts";
 import {
   createCustomStatusPayload,
@@ -56,8 +59,9 @@ function ok(stdout = "") {
   return { stdout, stderr: "", code: 0, killed: false };
 }
 
-function missingFileError(path) {
-  return Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+async function tempEnv() {
+  const directory = await mkdtemp(join(tmpdir(), "jpi-status-config-"));
+  return { PI_CODING_AGENT_DIR: directory };
 }
 
 const inertScheduler = {
@@ -100,111 +104,120 @@ function statusLineConfig(format = DEFAULT_STATUS_LINE_FORMAT, disabledStatuses 
   return { format, disabledStatuses: new Set(disabledStatuses) };
 }
 
-test("status-line config paths honor the Pi agent directory and expand home", () => {
-  assert.equal(
-    getStatusLineConfigPath({}, "/Users/tester"),
-    "/Users/tester/.pi/agent/status-line.json",
-  );
-  assert.equal(
-    getStatusLineConfigPath({ PI_CODING_AGENT_DIR: "~/custom-agent" }, "/Users/tester"),
-    "/Users/tester/custom-agent/status-line.json",
-  );
-  assert.equal(
-    getStatusLineConfigPath({ PI_CODING_AGENT_DIR: "/tmp/pi-agent" }, "/Users/tester"),
-    "/tmp/pi-agent/status-line.json",
-  );
+test("status config resolves to jpi.kdl under the Pi agent directory", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  assert.match(config.path, /jpi\.kdl$/);
+  assert.equal(config.path, join(env.PI_CODING_AGENT_DIR, "jpi.kdl"));
 });
 
-test("status-line config parsing supports default and custom formats", () => {
-  const defaults = parseStatusLineConfigText("{}");
-  assert.equal(defaults.problem, undefined);
-  assert.deepEqual(defaults.config.format, DEFAULT_STATUS_LINE_FORMAT);
-  assert.deepEqual([...defaults.config.disabledStatuses], []);
+test("loading with no jpi.kdl file writes the live-default stanza and decodes cleanly", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
 
-  const custom = parseStatusLineConfigText(JSON.stringify({
-    format: [["@jpi/model", "auto-review"], [], ["@jpi/slot"]],
-    disabledStatuses: ["auto-review", "future-status", "auto-review", " padded "],
-  }));
-  assert.equal(custom.problem, undefined);
-  assert.deepEqual(custom.config.format, [
-    ["@jpi/model", "auto-review"],
-    [],
-    ["@jpi/slot"],
+  const result = await loadStatusLineConfig(config);
+  assert.equal(result.problem, undefined);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.config, createDefaultStatusLineConfig());
+
+  const text = await readFile(config.path, "utf8");
+  assert.match(text, /status \{/);
+  assert.match(text, /row "@jpi\/model" "@jpi\/context" "@jpi\/repository" "@jpi\/worktree" "@jpi\/branch" "@jpi\/pull-request" "@jpi\/stack"/);
+  assert.match(text, /row "@jpi\/slot"/);
+});
+
+test("a hand-written status section decodes rows and disabled statuses", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    [
+      "status {",
+      "  format {",
+      '    row "@jpi/model" "@jpi/branch"',
+      '    row "@custom:bin/status"',
+      "  }",
+      '  disabled-statuses "auto-review"',
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const result = await loadStatusLineConfig(config);
+  assert.equal(result.problem, undefined);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.config.format, [
+    ["@jpi/model", "@jpi/branch"],
+    ["@custom:bin/status"],
   ]);
-  assert.deepEqual(
-    [...custom.config.disabledStatuses],
-    ["auto-review", "future-status", " padded "],
+  assert.deepEqual([...result.config.disabledStatuses], ["auto-review"]);
+});
+
+test("repeated disabled-statuses nodes collect into a deduplicated set", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    [
+      "status {",
+      "  format {",
+      '    row "@jpi/model"',
+      "  }",
+      '  disabled-statuses "auto-review"',
+      '  disabled-statuses "auto-review"',
+      '  disabled-statuses "other"',
+      "}",
+    ].join("\n"),
+    "utf8",
   );
 
-  const empty = parseStatusLineConfigText('{"format":[]}');
-  assert.equal(empty.problem, undefined);
-  assert.deepEqual(empty.config.format, []);
-  assert.deepEqual([...empty.config.disabledStatuses], []);
+  const result = await loadStatusLineConfig(config);
+  assert.equal(result.problem, undefined);
+  assert.deepEqual([...result.config.disabledStatuses], ["auto-review", "other"]);
 });
 
-test("invalid status-line formats fail to the full default config", () => {
-  const invalidConfigs = [
-    ["malformed JSON", "{", /invalid JSON/],
-    ["non-object root", "[]", /JSON object/],
-    ["non-array format", '{"format": true}', /format must be an array/],
-    ["non-array line", '{"format": [true]}', /format\[0\].*array/],
-    ["non-string ID", '{"format": [[1]]}', /format\[0\]\[0\].*non-blank string/],
-    ["blank ID", '{"format": [["  "]]}', /format\[0\]\[0\].*non-blank string/],
-    ["unknown reserved ID", '{"format": [["@jpi/modle"]]}', /unknown reserved ID/],
-    ["non-array disabled list", '{"disabledStatuses": true}', /must be an array/],
-    ["non-string disabled ID", '{"disabledStatuses": [1]}', /\[0\].*non-blank string/],
-    ["blank disabled ID", '{"disabledStatuses": ["  "]}', /\[0\].*non-blank string/],
-  ];
-  for (const [name, text, pattern] of invalidConfigs) {
-    const result = parseStatusLineConfigText(text);
-    assert.match(result.problem, pattern, name);
-    assert.deepEqual(result.config.format, DEFAULT_STATUS_LINE_FORMAT, name);
-    assert.deepEqual([...result.config.disabledStatuses], [], name);
-  }
+test("an unknown @jpi/ component warns and falls back to the full default, discarding disabled-statuses too", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    [
+      "status {",
+      "  format {",
+      '    row "@jpi/modle"',
+      "  }",
+      '  disabled-statuses "kept-only-on-success"',
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const result = await loadStatusLineConfig(config);
+  assert.match(result.problem, /unknown reserved ID @jpi\/modle/);
+  assert.deepEqual(result.config.format, DEFAULT_STATUS_LINE_FORMAT);
+  assert.deepEqual([...result.config.disabledStatuses], []);
 });
 
-test("status-line config loading treats a missing file as valid and other read errors as invalid", async () => {
-  const path = "/config/status-line.json";
-  const missing = await loadStatusLineConfig(path, async () => {
-    throw missingFileError(path);
-  });
-  assert.equal(missing.path, path);
-  assert.equal(missing.missing, true);
-  assert.equal(missing.problem, undefined);
-  assert.deepEqual(missing.config.format, DEFAULT_STATUS_LINE_FORMAT);
-  assert.deepEqual([...missing.config.disabledStatuses], []);
+test("a blank @custom: path warns and falls back to the full default", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "@custom:"', "  }", "}"].join("\n"),
+    "utf8",
+  );
 
-  const unreadable = await loadStatusLineConfig(path, async () => {
-    throw new Error("permission denied");
-  });
-  assert.equal(unreadable.path, path);
-  assert.match(unreadable.problem, /could not read config: permission denied/);
-  assert.deepEqual(unreadable.config.format, DEFAULT_STATUS_LINE_FORMAT);
-  assert.deepEqual([...unreadable.config.disabledStatuses], []);
-});
-
-test("custom status config reserves @custom: and rejects blank executable paths", () => {
-  const valid = parseStatusLineConfigText(JSON.stringify({
-    format: [["@custom:/usr/local/bin/status", "@custom:bin/status"]],
-  }));
-  assert.equal(valid.problem, undefined);
-  assert.deepEqual(valid.config.format, [[
-    "@custom:/usr/local/bin/status",
-    "@custom:bin/status",
-  ]]);
-
-  for (const componentId of ["@custom:", "@custom:   "]) {
-    const invalid = parseStatusLineConfigText(JSON.stringify({ format: [[componentId]] }));
-    assert.match(invalid.problem, /blank @custom: path/);
-    assert.deepEqual(invalid.config.format, DEFAULT_STATUS_LINE_FORMAT);
-  }
+  const result = await loadStatusLineConfig(config);
+  assert.match(result.problem, /blank @custom: path/);
+  assert.deepEqual(result.config.format, DEFAULT_STATUS_LINE_FORMAT);
+  assert.deepEqual([...result.config.disabledStatuses], []);
 });
 
 test("custom executable paths resolve from root or the config directory by occurrence", () => {
   const occurrences = getCustomOccurrences([
     ["@custom:/opt/status", "extension", "@custom:bin/status"],
     ["@custom:bin/status"],
-  ], "/Users/tester/.pi/agent/status-line.json");
+  ], "/Users/tester/.pi/agent/jpi.kdl");
 
   assert.deepEqual(occurrences, [
     {
@@ -516,7 +529,7 @@ test("custom commands start immediately, run duplicates concurrently, and use on
   const controller = new CustomStatusController({
     exec,
     format: [["@custom:bin/status", "@custom:bin/status"]],
-    configPath: "/config/status-line.json",
+    configPath: "/config/jpi.kdl",
     getPayload: () => ({ ...customPayload(), statuses: { version: String(payloadVersion) } }),
     requestRender: () => { renderRequests += 1; },
     notify() {},
@@ -576,7 +589,7 @@ test("custom failures hide output and suppress warnings until reason, success, o
       return response;
     },
     format: [["@custom:status"]],
-    configPath: "/config/status-line.json",
+    configPath: "/config/jpi.kdl",
     getPayload: () => customPayload(),
     requestRender() {},
     notify: (message, level) => notifications.push({ message, level }),
@@ -620,7 +633,7 @@ test("disposing custom commands aborts in-flight execution and clears its timer"
       });
     },
     format: [["@custom:status"]],
-    configPath: "/config/status-line.json",
+    configPath: "/config/jpi.kdl",
     getPayload: () => customPayload(),
     requestRender() {},
     notify() {},
@@ -663,18 +676,21 @@ test("metadata loading uses bounded git and wt commands and degrades optional fi
   assert.ok(calls.some((call) => call.command === "wt" && call.args[0] === "stack"));
 });
 
-test("the extension loads the status layout before installing the footer", async () => {
+test("the extension loads the status config before installing the footer", async () => {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "other" "@jpi/model"', "  }", '  disabled-statuses "auto-review"', "}"].join("\n"),
+    "utf8",
+  );
+
   let footerFactory;
-  let resolveConfig;
-  const configText = new Promise((resolve) => { resolveConfig = resolve; });
   const extension = createStatusExtension(
     async () => ({ ...ok(), code: 1 }),
     widthHelpers,
     inertScheduler,
-    {
-      configPath: "/config/status-line.json",
-      readTextFile: async () => configText,
-    },
+    { env },
   );
   const context = {
     mode: "tui",
@@ -689,11 +705,7 @@ test("the extension loads the status layout before installing the footer", async
     },
   };
 
-  const started = extension.onSessionStart({}, context);
-  await Promise.resolve();
-  assert.equal(footerFactory, undefined);
-  resolveConfig('{"format":[["other","@jpi/model"]],"disabledStatuses":["auto-review"]}');
-  await started;
+  await extension.onSessionStart({}, context);
   assert.equal(typeof footerFactory, "function");
 
   const component = footerFactory({ requestRender() {} }, {}, {
@@ -708,7 +720,22 @@ test("the extension loads the status layout before installing the footer", async
 });
 
 test("reloading status config rerenders valid and fail-default changes", async () => {
-  let configText = '{"disabledStatuses":["hidden"]}';
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    [
+      "status {",
+      "  format {",
+      '    row "@jpi/model"',
+      '    row "@jpi/slot"',
+      "  }",
+      '  disabled-statuses "hidden"',
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+
   let footerFactory;
   let renderRequests = 0;
   const notifications = [];
@@ -716,10 +743,7 @@ test("reloading status config rerenders valid and fail-default changes", async (
     async () => ({ ...ok(), code: 1 }),
     widthHelpers,
     inertScheduler,
-    {
-      configPath: "/config/status-line.json",
-      readTextFile: async () => configText,
-    },
+    { env },
   );
   const context = {
     mode: "tui",
@@ -752,7 +776,7 @@ test("reloading status config rerenders valid and fail-default changes", async (
   renderRequests = 0;
   assert.deepEqual(component.render(80).map(plain), [" Test model", " shown"]);
 
-  configText = '{"format":[["visible","@jpi/model"]],"disabledStatuses":[]}';
+  await writeFile(config.path, ["status {", "  format {", '    row "visible" "@jpi/model"', "  }", "}"].join("\n"), "utf8");
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 1);
   assert.deepEqual(component.render(80).map(plain), [" shown · Test model"]);
@@ -761,22 +785,49 @@ test("reloading status config rerenders valid and fail-default changes", async (
     level: "info",
   });
 
-  configText = '{"format":[["@jpi/model"],["@jpi/slot"]],"disabledStatuses":["hidden"]}';
+  await writeFile(
+    config.path,
+    [
+      "status {",
+      "  format {",
+      '    row "@jpi/model"',
+      '    row "@jpi/slot"',
+      "  }",
+      '  disabled-statuses "hidden"',
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 2);
   assert.deepEqual(component.render(80).map(plain), [" Test model", " shown"]);
 
-  configText = "{";
+  await writeFile(config.path, 'status {\n  format {\n    row "unterminated\n  }\n}\n', "utf8");
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 3);
   assert.deepEqual(component.render(80).map(plain), [" Test model", " hidden · shown"]);
   assert.equal(notifications.at(-1).level, "warning");
-  assert.match(notifications.at(-1).message, /\/config\/status-line\.json.*invalid JSON.*default config/);
+  assert.match(notifications.at(-1).message, /has issues:/);
+  assert.match(notifications.at(-1).message, /could not parse jpi\.kdl/);
+
+  await writeFile(config.path, ["status {", "  format {", '    row "@jpi/modle"', "  }", "}"].join("\n"), "utf8");
+  await extension.onCommand("reload", context);
+  assert.equal(renderRequests, 4);
+  assert.deepEqual(component.render(80).map(plain), [" Test model", " hidden · shown"]);
+  assert.equal(notifications.at(-1).level, "warning");
+  assert.match(notifications.at(-1).message, /Could not load jpi-status config/);
+  assert.match(notifications.at(-1).message, /unknown reserved ID @jpi\/modle/);
+  assert.match(notifications.at(-1).message, /Using the default config\.$/);
   component.dispose();
 });
 
 test("reloading config aborts stale custom runs and immediately rebuilds occurrences", async () => {
-  let configText = '{"format":[["@custom:old"]]}';
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  const oldPath = join(env.PI_CODING_AGENT_DIR, "old");
+  const newPath = join(env.PI_CODING_AGENT_DIR, "new");
+  await writeFile(config.path, ["status {", "  format {", '    row "@custom:old"', "  }", "}"].join("\n"), "utf8");
+
   let footerFactory;
   let oldSignal;
   let newCall;
@@ -784,22 +835,19 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
   const scheduler = manualScheduler();
   const notifications = [];
   const exec = async (command, args, options) => {
-    if (command === "/config/old") {
+    if (command === oldPath) {
       oldSignal = options.signal;
       return new Promise((_resolve, reject) => {
         oldSignal.addEventListener("abort", () => reject(new Error("stale")), { once: true });
       });
     }
-    if (command === "/config/new") {
+    if (command === newPath) {
       newCall = { command, args, options };
       return ok(" new\noutput ");
     }
     return { ...ok(), code: 1 };
   };
-  const extension = createStatusExtension(exec, widthHelpers, scheduler, {
-    configPath: "/config/status-line.json",
-    readTextFile: async () => configText,
-  });
+  const extension = createStatusExtension(exec, widthHelpers, scheduler, { env });
   const context = {
     mode: "tui",
     cwd: "/repo",
@@ -827,10 +875,10 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
   assert.equal(oldSignal.aborted, false);
   assert.deepEqual(component.render(80), []);
 
-  configText = '{"format":[["@custom:new"]]}';
+  await writeFile(config.path, ["status {", "  format {", '    row "@custom:new"', "  }", "}"].join("\n"), "utf8");
   await extension.onCommand("reload", context);
   assert.equal(oldSignal.aborted, true);
-  assert.equal(newCall.command, "/config/new");
+  assert.equal(newCall.command, newPath);
   assert.deepEqual(JSON.parse(newCall.args[0]).statuses, { disabled: "included in payload" });
   assert.deepEqual(component.render(80).map(plain), [" new output"]);
   assert.ok(renderRequests >= 2);
@@ -871,10 +919,8 @@ test("the extension installs only in TUI mode and cleans up component resources"
     ]);
     return outputs.has(key) ? ok(outputs.get(key)) : { ...ok(), code: 1 };
   };
-  const extension = createStatusExtension(exec, widthHelpers, scheduler, {
-    configPath: "/config/status-line.json",
-    readTextFile: async (path) => { throw missingFileError(path); },
-  });
+  const env = await tempEnv();
+  const extension = createStatusExtension(exec, widthHelpers, scheduler, { env });
   const context = {
     mode: "json",
     cwd: "/repo",

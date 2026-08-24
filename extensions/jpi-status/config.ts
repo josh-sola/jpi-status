@@ -1,6 +1,4 @@
-import { join } from "node:path";
-
-import { getAgentDirectory, loadJsonConfig, type ReadTextFile } from "jpi-base";
+import { Config, j } from "jpi-base";
 
 import { CUSTOM_COMPONENT_PREFIX, isCustomComponentId } from "./custom.ts";
 import {
@@ -9,6 +7,38 @@ import {
   type StatusLineFormat,
 } from "./layout.ts";
 
+const row = j.node({
+  attrs: {
+    components: j
+      .array(j.string())
+      .describe("component ids, left to right")
+      .default([]),
+  },
+});
+
+const statusSchema = j.node({
+  fields: {
+    format: j.node({
+      fields: {
+        row: j.list(row, {
+          description: "status line rows, top to bottom",
+          default: DEFAULT_STATUS_LINE_FORMAT.map((line) => ({ components: [...line] })),
+        }),
+      },
+    }),
+    disabledStatuses: j.list(j.string(), {
+      description: "built-in statuses to hide",
+      default: [],
+    }),
+  },
+});
+
+export type StatusConfig = Config<typeof statusSchema>;
+
+export function createStatusConfig(env?: NodeJS.ProcessEnv, homeDirectory?: string): StatusConfig {
+  return new Config("status", statusSchema, env, homeDirectory);
+}
+
 export type StatusLineConfig = {
   format: StatusLineFormat;
   disabledStatuses: ReadonlySet<string>;
@@ -16,12 +46,10 @@ export type StatusLineConfig = {
 
 export type StatusLineConfigResult = {
   config: StatusLineConfig;
-  path?: string;
-  missing?: boolean;
+  path: string;
+  issues: string[];
   problem?: string;
 };
-
-export type { ReadTextFile };
 
 export function createDefaultStatusLineConfig(): StatusLineConfig {
   return {
@@ -30,106 +58,41 @@ export function createDefaultStatusLineConfig(): StatusLineConfig {
   };
 }
 
-function invalidConfig(problem: string): StatusLineConfigResult {
-  return { config: createDefaultStatusLineConfig(), problem };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function getStatusLineConfigPath(
-  env: NodeJS.ProcessEnv = process.env,
-  homeDirectory?: string,
-): string {
-  return join(getAgentDirectory(env, homeDirectory), "status-line.json");
-}
-
-function parseStatusLineConfigValue(parsed: unknown): StatusLineConfigResult {
-  if (!isRecord(parsed)) {
-    return invalidConfig("status-line.json must contain a JSON object");
+function checkComponentIds(rows: readonly { components: readonly string[] }[]): string | undefined {
+  for (let lineIndex = 0; lineIndex < rows.length; lineIndex += 1) {
+    const components = rows[lineIndex]!.components;
+    for (let componentIndex = 0; componentIndex < components.length; componentIndex += 1) {
+      const componentId = components[componentIndex]!;
+      if (componentId.startsWith("@jpi/") && !isJpiComponentId(componentId)) {
+        return `format.row[${lineIndex}].components[${componentIndex}] has unknown reserved ID ${componentId}`;
+      }
+      if (componentId.startsWith(CUSTOM_COMPONENT_PREFIX) && !isCustomComponentId(componentId)) {
+        return `format.row[${lineIndex}].components[${componentIndex}] has a blank @custom: path`;
+      }
+    }
   }
+  return undefined;
+}
 
-  let format = DEFAULT_STATUS_LINE_FORMAT;
-  if (parsed.format !== undefined) {
-    if (!Array.isArray(parsed.format)) {
-      return invalidConfig("format must be an array of lines");
-    }
+export async function loadStatusLineConfig(config: StatusConfig): Promise<StatusLineConfigResult> {
+  const { value, issues } = await config.load();
+  const problem = checkComponentIds(value.format.row);
 
-    const parsedFormat: string[][] = [];
-    for (let lineIndex = 0; lineIndex < parsed.format.length; lineIndex += 1) {
-      const line = parsed.format[lineIndex];
-      if (!Array.isArray(line)) {
-        return invalidConfig(`format[${lineIndex}] must be an array of component IDs`);
-      }
-
-      const parsedLine: string[] = [];
-      for (let componentIndex = 0; componentIndex < line.length; componentIndex += 1) {
-        const componentId = line[componentIndex];
-        if (typeof componentId !== "string" || componentId.trim() === "") {
-          return invalidConfig(`format[${lineIndex}][${componentIndex}] must be a non-blank string`);
-        }
-        if (componentId.startsWith("@jpi/") && !isJpiComponentId(componentId)) {
-          return invalidConfig(
-            `format[${lineIndex}][${componentIndex}] has unknown reserved ID ${componentId}`,
-          );
-        }
-        if (componentId.startsWith(CUSTOM_COMPONENT_PREFIX) && !isCustomComponentId(componentId)) {
-          return invalidConfig(
-            `format[${lineIndex}][${componentIndex}] has a blank @custom: path`,
-          );
-        }
-        parsedLine.push(componentId);
-      }
-      parsedFormat.push(parsedLine);
-    }
-    format = parsedFormat;
-  }
-
-  const disabledStatuses = new Set<string>();
-  if (parsed.disabledStatuses !== undefined) {
-    if (!Array.isArray(parsed.disabledStatuses)) {
-      return invalidConfig("disabledStatuses must be an array");
-    }
-
-    for (let index = 0; index < parsed.disabledStatuses.length; index += 1) {
-      const entry = parsed.disabledStatuses[index];
-      if (typeof entry !== "string" || entry.trim() === "") {
-        return invalidConfig(`disabledStatuses[${index}] must be a non-blank string`);
-      }
-      disabledStatuses.add(entry);
-    }
+  if (problem) {
+    return {
+      config: createDefaultStatusLineConfig(),
+      path: config.path,
+      issues: [...issues, problem],
+      problem,
+    };
   }
 
   return {
-    config: { format, disabledStatuses },
+    config: {
+      format: value.format.row.map((entry) => entry.components) as StatusLineFormat,
+      disabledStatuses: new Set(value.disabledStatuses),
+    },
+    path: config.path,
+    issues,
   };
-}
-
-export function parseStatusLineConfigText(rawText: string): StatusLineConfigResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return invalidConfig(`invalid JSON: ${message}`);
-  }
-
-  return parseStatusLineConfigValue(parsed);
-}
-
-export async function loadStatusLineConfig(
-  path: string,
-  readTextFile?: ReadTextFile,
-): Promise<StatusLineConfigResult> {
-  const result = await loadJsonConfig(path, readTextFile);
-
-  if ("missing" in result) {
-    return { config: createDefaultStatusLineConfig(), path, missing: true };
-  }
-  if ("problem" in result) {
-    return { config: createDefaultStatusLineConfig(), path, problem: result.problem };
-  }
-
-  return { ...parseStatusLineConfigValue(result.value), path };
 }

@@ -1,8 +1,7 @@
 import {
   createDefaultStatusLineConfig,
-  getStatusLineConfigPath,
+  createStatusConfig,
   loadStatusLineConfig,
-  type ReadTextFile,
   type StatusLineConfig,
 } from "./config.ts";
 import {
@@ -56,8 +55,8 @@ export type StatusExtension = {
 };
 
 export type StatusConfigDependencies = {
-  configPath?: string;
-  readTextFile?: ReadTextFile;
+  env?: NodeJS.ProcessEnv;
+  homeDirectory?: string;
 };
 
 type ControllerOptions = {
@@ -143,14 +142,14 @@ export function createStatusExtension(
   scheduler: Scheduler = { setInterval, clearInterval },
   configDependencies: StatusConfigDependencies = {},
 ): StatusExtension {
-  const configPath = configDependencies.configPath ?? getStatusLineConfigPath();
+  const statusConfig = createStatusConfig(configDependencies.env, configDependencies.homeDirectory);
   let activeController: RepositoryMetadataController | undefined;
   let activeCustomController: CustomStatusController | undefined;
   let statusLineConfig: StatusLineConfig = createDefaultStatusLineConfig();
   let requestFooterRender: (() => void) | undefined;
 
   const reloadConfig = async (context: FooterContext, announce: boolean): Promise<void> => {
-    const result = await loadStatusLineConfig(configPath, configDependencies.readTextFile);
+    const result = await loadStatusLineConfig(statusConfig);
     statusLineConfig = result.config;
     if (activeCustomController) {
       await activeCustomController.updateFormat(statusLineConfig.format);
@@ -160,7 +159,15 @@ export function createStatusExtension(
 
     if (result.problem) {
       context.ui.notify(
-        `Could not load jpi-status config at ${configPath}: ${result.problem}. Using the default config.`,
+        `Could not load jpi-status config at ${result.path}: ${result.issues.join("; ")}. Using the default config.`,
+        "warning",
+      );
+      return;
+    }
+
+    if (result.issues.length > 0) {
+      context.ui.notify(
+        `jpi-status config at ${result.path} has issues: ${result.issues.join("; ")}.`,
         "warning",
       );
       return;
@@ -190,7 +197,7 @@ export function createStatusExtension(
         const customController = new CustomStatusController({
           exec,
           format: statusLineConfig.format,
-          configPath,
+          configPath: statusConfig.path,
           getPayload: () => createCustomStatusPayload(
             context,
             controller.metadata,
