@@ -296,7 +296,8 @@ export class CustomStatusController {
           if (!this.isCurrent(run)) return;
           const failure = resultFailure(result);
           if (failure) {
-            this.recordFailure(occurrence, failure);
+            // Timeouts are routine under machine load, so they never warn.
+            this.recordFailure(occurrence, failure, !result.killed);
             return;
           }
           const state = this.states.get(occurrence.key);
@@ -316,11 +317,11 @@ export class CustomStatusController {
     return !this.disposed && run.generation === this.generation;
   }
 
-  private recordFailure(occurrence: CustomOccurrence, reason: string): void {
+  private recordFailure(occurrence: CustomOccurrence, reason: string, notify = true): void {
     const state = this.states.get(occurrence.key);
     if (!state) return;
     state.output = undefined;
-    if (state.failure !== reason) {
+    if (notify && state.failure !== reason) {
       this.options.notify(
         `jpi-status ${occurrence.id} at format[${occurrence.lineIndex}][${occurrence.componentIndex}] failed: ${reason}.`,
         "warning",

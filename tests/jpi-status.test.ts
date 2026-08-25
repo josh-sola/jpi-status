@@ -708,7 +708,7 @@ test("custom commands start immediately, run duplicates concurrently, and use on
   assert.deepEqual(scheduler.cleared, [scheduler.timers[0]]);
 });
 
-test("custom failures hide output and suppress warnings until reason, success, or config changes", async () => {
+test("custom failures hide output and warn once per reason; timeouts stay silent", async () => {
   const scheduler = manualScheduler();
   const notifications: Array<{ message: string; level: "warning" }> = [];
   const responses: Array<ExecResult | Error> = [
@@ -747,14 +747,15 @@ test("custom failures hide output and suppress warnings until reason, success, o
   assert.equal(notifications.length, 2);
   assert.match(notifications[1]!.message, /could not run: permission denied/);
   await controller.refresh();
-  assert.equal(notifications.length, 3);
-  assert.match(notifications[2]!.message, /timed out after 3000ms/);
+  assert.equal(notifications.length, 2);
+  assert.equal(controller.outputs.size, 0);
   await controller.refresh();
   assert.equal(controller.outputs.size, 0);
   await controller.refresh();
-  assert.equal(notifications.length, 4);
+  assert.equal(notifications.length, 2);
+  assert.equal(controller.outputs.size, 0);
   await controller.updateFormat([["@custom:status"]]);
-  assert.equal(notifications.length, 5);
+  assert.equal(notifications.length, 2);
   assert.ok(notifications.every(({ level }) => level === "warning"));
   controller.dispose();
 });

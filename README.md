@@ -93,7 +93,8 @@ session (model, context usage, repository, and every published extension
 status). It runs when the footer starts, right after a config reload, and
 every 10 seconds after that, with a 3-second timeout. Empty or
 whitespace-only output hides the component; a timeout, error, or nonzero
-exit also hides it and warns once, until the next success or config reload.
+exit also hides it. Errors and nonzero exits warn once, until the next
+success or config reload; timeouts stay silent.
 
 ### Commands
 
