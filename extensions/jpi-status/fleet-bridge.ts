@@ -8,6 +8,7 @@ export const FLEET_CONSUMER_READY_CHANNEL = "subagents:fleet:consumer-ready:v1";
 
 export type FleetConsumer = {
   requestRender(): void;
+  getFocusedComponent?(): unknown;
 };
 
 export type FleetProviderPayload = {

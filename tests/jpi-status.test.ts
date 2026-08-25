@@ -35,6 +35,7 @@ import {
 import {
   FLEET_CONSUMER_READY_CHANNEL,
   FLEET_PROVIDER_CHANNEL,
+  type FleetConsumer,
   type FleetProviderPayload,
 } from "../extensions/jpi-status/fleet-bridge.ts";
 import {
@@ -1551,6 +1552,37 @@ test("jpi-subagents fleet lines render below the status rows, with width and the
 
   assert.deepEqual(component.render(80).map(plain), [" Test model", "fleet row"]);
   assert.deepEqual(received, { width: 80, theme });
+  component.dispose();
+});
+
+test("the fleet consumer exposes the footer TUI's current focused component", async () => {
+  const events = fakeEventBus();
+  const footerFactory = await fleetFooterHarness(events);
+  const promptEditor = { name: "prompt-editor" };
+  const selector = { name: "selector" };
+  let focusedComponent: unknown = promptEditor;
+  const tui = {
+    requestRender() {},
+    getFocusedComponent: () => focusedComponent,
+  };
+  const component = footerFactory(tui, {}, {
+    getExtensionStatuses: () => new Map(),
+    onBranchChange: () => () => {},
+  });
+
+  let attachedConsumer: FleetConsumer | undefined;
+  events.emit(FLEET_PROVIDER_CHANNEL, {
+    schema: "subagents.fleet.provider.v1",
+    render: () => [],
+    attach(consumer) {
+      attachedConsumer = consumer;
+      return () => {};
+    },
+  } satisfies FleetProviderPayload);
+
+  assert.equal(attachedConsumer?.getFocusedComponent?.(), promptEditor);
+  focusedComponent = selector;
+  assert.equal(attachedConsumer?.getFocusedComponent?.(), selector);
   component.dispose();
 });
 

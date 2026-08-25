@@ -228,7 +228,11 @@ export function createStatusExtension(
           if (!isFleetProviderPayload(data)) return;
           fleetDetach?.();
           fleetProvider = data;
-          fleetDetach = data.attach({ requestRender: renderFooterNow });
+          fleetDetach = data.attach({
+            requestRender: renderFooterNow,
+            getFocusedComponent: () =>
+              (tui as { getFocusedComponent(): unknown }).getFocusedComponent(),
+          });
         });
         events.emit(FLEET_CONSUMER_READY_CHANNEL, { schema: "subagents.fleet.consumer-ready.v1" });
         let controller: RepositoryMetadataController;
