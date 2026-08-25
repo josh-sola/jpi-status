@@ -44,6 +44,7 @@ import {
   renderFooter,
   type WidthHelpers,
 } from "../extensions/jpi-status/render.ts";
+import { FooterStats } from "../extensions/jpi-status/stats.ts";
 
 const CSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OSC_PATTERN = /\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
@@ -1202,4 +1203,260 @@ test("metadata refreshes are single-flight and stale generations are not publish
   assert.equal(stackCalls, 2);
   assert.equal(renderRequests, 1);
   controller.dispose();
+});
+
+test("new footer segments render abbreviated counts and cumulative stats", () => {
+  const lines = renderFooter(
+    {
+      modelName: "Model",
+      sessionName: "Fix flaky test",
+      contextWindow: 1_000_000,
+      contextTokens: 750_000,
+      turnCount: 4,
+      liveSpeed: 42,
+      cost: 1.5,
+      tokensIn: 12_000,
+      tokensOut: 4_000,
+      cacheRead: 1_000,
+      cacheWrite: 0,
+      activeToolName: "Bash",
+      cwd: "/Users/tester/project",
+      homeDirectory: "/Users/tester",
+      repository: {},
+      statuses: new Map(),
+      config: statusLineConfig([
+        [
+          "@jpi/name",
+          "@jpi/ctx-total",
+          "@jpi/ctx-used",
+          "@jpi/ctx-remaining",
+          "@jpi/turns",
+          "@jpi/speed",
+          "@jpi/cost",
+          "@jpi/tokens-in",
+          "@jpi/tokens-out",
+          "@jpi/tokens-total",
+          "@jpi/directory",
+          "@jpi/tool",
+        ],
+      ]),
+    },
+    200,
+    widthHelpers,
+  );
+
+  assert.deepEqual(lines.map(plain), [
+    " Fix flaky test · max 1.0M · used 750k · left 250k · turns 4 · 42 tok/s · $1.500 · in 12k · out 4k · total 17k · ~/project · tool Bash",
+  ]);
+});
+
+test("new footer segments omit unset session name, unknown context tokens, and an idle tool or speed", () => {
+  const lines = renderFooter(
+    {
+      modelName: "Model",
+      turnCount: 0,
+      cost: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      repository: {},
+      statuses: new Map(),
+      config: statusLineConfig([
+        [
+          "@jpi/name",
+          "@jpi/ctx-used",
+          "@jpi/ctx-remaining",
+          "@jpi/speed",
+          "@jpi/tool",
+          "@jpi/turns",
+          "@jpi/cost",
+        ],
+      ]),
+    },
+    120,
+    widthHelpers,
+  );
+
+  assert.deepEqual(lines.map(plain), [" turns 0 · $0.000"]);
+});
+
+test("the directory segment abbreviates the home prefix and omits without a cwd", () => {
+  const withSubdirectory = renderFooter(
+    {
+      modelName: "Model",
+      cwd: "/Users/tester/project/sub",
+      homeDirectory: "/Users/tester",
+      repository: {},
+      statuses: new Map(),
+      config: statusLineConfig([["@jpi/directory"]]),
+    },
+    120,
+    widthHelpers,
+  );
+  assert.deepEqual(withSubdirectory.map(plain), [" ~/project/sub"]);
+
+  const atHome = renderFooter(
+    {
+      modelName: "Model",
+      cwd: "/Users/tester",
+      homeDirectory: "/Users/tester",
+      repository: {},
+      statuses: new Map(),
+      config: statusLineConfig([["@jpi/directory"]]),
+    },
+    120,
+    widthHelpers,
+  );
+  assert.deepEqual(atHome.map(plain), [" ~"]);
+
+  const withoutCwd = renderFooter(
+    {
+      modelName: "Model",
+      homeDirectory: "/Users/tester",
+      repository: {},
+      statuses: new Map(),
+      config: statusLineConfig([["@jpi/directory"]]),
+    },
+    120,
+    widthHelpers,
+  );
+  assert.deepEqual(withoutCwd, []);
+});
+
+test("footer stats seed session name, tokens, cost, and turn count (completed agent-loop turns) from branch replay", () => {
+  const stats = new FooterStats();
+  stats.onSessionStart({
+    sessionManager: {
+      getSessionName: () => "Resumed session",
+      getBranch: () => [
+        { type: "message", message: { role: "user", content: "hi" } },
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5, cost: { total: 1.5 } },
+          },
+        },
+        { type: "message", message: { role: "user", content: "again" } },
+        {
+          type: "message",
+          message: { role: "assistant", stopReason: "aborted", usage: { input: 999, output: 999 } },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", usage: { input: 20, output: 10, cost: { total: 2.25 } } },
+        },
+        // A trailing user message with no assistant reply yet: three user
+        // turns but only two completed (non-error, non-aborted) assistant ones.
+        { type: "message", message: { role: "user", content: "pending" } },
+      ],
+    },
+  });
+
+  const snapshot = stats.snapshot();
+  assert.equal(snapshot.sessionName, "Resumed session");
+  assert.equal(snapshot.turnCount, 2);
+  assert.equal(snapshot.tokensIn, 120);
+  assert.equal(snapshot.tokensOut, 60);
+  assert.equal(snapshot.cacheRead, 10);
+  assert.equal(snapshot.cacheWrite, 5);
+  assert.equal(snapshot.cost, 3.75);
+});
+
+test("footer stats default the session name to null and follow session_info_changed", () => {
+  const stats = new FooterStats();
+  stats.onSessionStart({});
+  assert.equal(stats.snapshot().sessionName, null);
+  stats.onSessionInfoChanged({ name: "Renamed" });
+  assert.equal(stats.snapshot().sessionName, "Renamed");
+  stats.onSessionInfoChanged({});
+  assert.equal(stats.snapshot().sessionName, null);
+});
+
+test("footer stats accumulate tokens and cost live, skipping error and aborted messages", () => {
+  const stats = new FooterStats();
+  stats.onSessionStart({});
+
+  stats.onMessageEnd({
+    message: { role: "assistant", usage: { input: 10, output: 5, cost: { total: 0.5 } } },
+  });
+  stats.onMessageEnd({
+    message: { role: "assistant", stopReason: "error", usage: { input: 999, output: 999 } },
+  });
+  stats.onMessageEnd({
+    message: { role: "assistant", usage: { input: 20, output: 8, cost: { total: 0.25 } } },
+  });
+  stats.onMessageEnd({ message: { role: "user" } });
+
+  const snapshot = stats.snapshot();
+  assert.equal(snapshot.tokensIn, 30);
+  assert.equal(snapshot.tokensOut, 13);
+  assert.equal(snapshot.cost, 0.75);
+});
+
+test("footer stats turn count increments once per turn_end, including consecutive single-turn agent runs", () => {
+  const stats = new FooterStats();
+  stats.onSessionStart({
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", message: { role: "user" } },
+        { type: "message", message: { role: "assistant" } },
+      ],
+    },
+  });
+  assert.equal(stats.snapshot().turnCount, 1);
+
+  // Two separate single-turn agent runs (simple Q&A) both end at turnIndex 0,
+  // but each is still one more completed turn.
+  stats.onTurnEnd();
+  assert.equal(stats.snapshot().turnCount, 2);
+  stats.onTurnEnd();
+  assert.equal(stats.snapshot().turnCount, 3);
+
+  // A multi-turn run (tool use) accumulates one per turn_end within the run.
+  stats.onTurnEnd();
+  stats.onTurnEnd();
+  assert.equal(stats.snapshot().turnCount, 5);
+});
+
+test("footer stats track the active tool and clear it on completion or turn end", () => {
+  const stats = new FooterStats();
+  stats.onSessionStart({});
+  assert.equal(stats.snapshot().activeToolName, null);
+
+  stats.onToolExecutionStart({ toolName: "Bash" });
+  assert.equal(stats.snapshot().activeToolName, "Bash");
+  stats.onToolExecutionEnd();
+  assert.equal(stats.snapshot().activeToolName, null);
+
+  stats.onToolExecutionStart({ toolName: "Read" });
+  assert.equal(stats.snapshot().activeToolName, "Read");
+  stats.onTurnEnd();
+  assert.equal(stats.snapshot().activeToolName, null);
+});
+
+test("footer stats sample generation speed over a rolling window and clear it at message boundaries", () => {
+  let now = 0;
+  const stats = new FooterStats(() => now);
+  stats.onSessionStart({});
+
+  stats.onMessageStart({ message: { role: "assistant" } });
+  assert.equal(stats.snapshot().liveSpeed, null);
+
+  stats.onMessageUpdate({ message: { role: "assistant", usage: { output: 10 } } });
+  assert.equal(stats.snapshot().liveSpeed, null);
+
+  now = 500;
+  stats.onMessageUpdate({ message: { role: "assistant", usage: { output: 60 } } });
+  assert.equal(stats.snapshot().liveSpeed, 100);
+
+  now = 1200;
+  stats.onMessageUpdate({
+    message: { role: "assistant", usage: { output: 0 }, content: "0123456789012345" },
+  });
+  // The content.length/4 fallback (4 tokens) is below the oldest sample, so
+  // no new estimate replaces the last real one.
+  assert.equal(stats.snapshot().liveSpeed, 100);
+
+  stats.onMessageEnd({ message: { role: "assistant", usage: { input: 1, output: 60 } } });
+  assert.equal(stats.snapshot().liveSpeed, null);
 });

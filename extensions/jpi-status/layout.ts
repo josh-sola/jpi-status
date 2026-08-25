@@ -7,6 +7,18 @@ export const JPI_COMPONENT_IDS = [
   "@jpi/pull-request",
   "@jpi/stack",
   "@jpi/slot",
+  "@jpi/name",
+  "@jpi/ctx-total",
+  "@jpi/ctx-used",
+  "@jpi/ctx-remaining",
+  "@jpi/turns",
+  "@jpi/speed",
+  "@jpi/cost",
+  "@jpi/tokens-in",
+  "@jpi/tokens-out",
+  "@jpi/tokens-total",
+  "@jpi/directory",
+  "@jpi/tool",
 ] as const;
 
 export type JpiComponentId = (typeof JPI_COMPONENT_IDS)[number];

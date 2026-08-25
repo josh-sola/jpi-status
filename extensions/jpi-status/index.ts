@@ -10,6 +10,13 @@ export default function jpiStatus(pi: ExtensionAPI) {
   );
 
   pi.on("session_start", extension.onSessionStart);
+  pi.on("session_info_changed", async (event) => extension.onSessionInfoChanged(event));
+  pi.on("turn_end", async () => extension.onTurnEnd());
+  pi.on("message_start", async (event) => extension.onMessageStart(event));
+  pi.on("message_update", async (event) => extension.onMessageUpdate(event));
+  pi.on("message_end", async (event) => extension.onMessageEnd(event));
+  pi.on("tool_execution_start", async (event) => extension.onToolExecutionStart(event));
+  pi.on("tool_execution_end", async () => extension.onToolExecutionEnd());
   pi.registerCommand("jpi-status", {
     description: "Show, refresh, or reload the custom footer",
     handler: extension.onCommand,

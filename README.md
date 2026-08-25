@@ -36,16 +36,28 @@ Each `row` is one footer line, given as positional component IDs. The footer
 drops unavailable components and lines that end up empty, and it joins the
 components on a line with `·`. The built-in component IDs are:
 
-| ID                  | Content                                           |
-| ------------------- | ------------------------------------------------- |
-| `@jpi/model`        | Active model name                                 |
-| `@jpi/context`      | Context-window percentage                         |
-| `@jpi/repository`   | Repository name                                   |
-| `@jpi/worktree`     | Linked `wt` tree name                             |
-| `@jpi/branch`       | Shortened branch name                             |
-| `@jpi/pull-request` | Graphite pull request and draft state             |
-| `@jpi/stack`        | Graphite stack position                           |
-| `@jpi/slot`         | Published extension statuses, sorted by status ID |
+| ID                   | Content                                           |
+| -------------------- | ------------------------------------------------- |
+| `@jpi/model`         | Active model name                                 |
+| `@jpi/context`       | Context-window percentage                         |
+| `@jpi/repository`    | Repository name                                   |
+| `@jpi/worktree`      | Linked `wt` tree name                             |
+| `@jpi/branch`        | Shortened branch name                             |
+| `@jpi/pull-request`  | Graphite pull request and draft state             |
+| `@jpi/stack`         | Graphite stack position                           |
+| `@jpi/slot`          | Published extension statuses, sorted by status ID |
+| `@jpi/name`          | Pi session name                                   |
+| `@jpi/ctx-total`     | Model context window, abbreviated                 |
+| `@jpi/ctx-used`      | Tokens currently in context, abbreviated          |
+| `@jpi/ctx-remaining` | Context window minus tokens in use, abbreviated   |
+| `@jpi/turns`         | Session turn count                                |
+| `@jpi/speed`         | Live generation speed while streaming             |
+| `@jpi/cost`          | Cumulative session cost                           |
+| `@jpi/tokens-in`     | Cumulative session input tokens, abbreviated      |
+| `@jpi/tokens-out`    | Cumulative session output tokens, abbreviated     |
+| `@jpi/tokens-total`  | Cumulative session tokens, abbreviated            |
+| `@jpi/directory`     | Session working directory, `~` abbreviated        |
+| `@jpi/tool`          | Name of the currently running tool                |
 
 Any other component ID is an exact, case-sensitive extension status ID, such
 as `auto-review`. A missing extension status is left out until that

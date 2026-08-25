@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+
 import {
   createDefaultStatusLineConfig,
   createStatusConfig,
@@ -11,6 +13,13 @@ import {
 } from "./custom.ts";
 import { loadRepositoryMetadata, type ExecCommand, type RepositoryMetadata } from "./data.ts";
 import { renderFooter, type WidthHelpers } from "./render.ts";
+import {
+  FooterStats,
+  type BranchEntryLike,
+  type MessageEventInput,
+  type SessionInfoChangedInput,
+  type ToolExecutionStartInput,
+} from "./stats.ts";
 
 const REFRESH_INTERVAL_MS = 10_000;
 
@@ -39,6 +48,10 @@ type FooterContext = {
         percent: number | null;
       }
     | undefined;
+  sessionManager?: {
+    getSessionName?(): string | undefined;
+    getBranch?(): BranchEntryLike[];
+  };
   ui: {
     notify(message: string, level?: "info" | "warning" | "error"): void;
     setFooter(
@@ -58,6 +71,13 @@ type Scheduler = IntervalScheduler;
 export type StatusExtension = {
   onSessionStart(event: unknown, context: FooterContext): Promise<void>;
   onCommand(args: string, context: FooterContext): Promise<void>;
+  onSessionInfoChanged(event: SessionInfoChangedInput): void;
+  onTurnEnd(): void;
+  onMessageStart(event: MessageEventInput): void;
+  onMessageUpdate(event: MessageEventInput): void;
+  onMessageEnd(event: MessageEventInput): void;
+  onToolExecutionStart(event: ToolExecutionStartInput): void;
+  onToolExecutionEnd(): void;
 };
 
 export type StatusConfigDependencies = {
@@ -149,6 +169,7 @@ export function createStatusExtension(
   configDependencies: StatusConfigDependencies = {},
 ): StatusExtension {
   const statusConfig = createStatusConfig(configDependencies.env, configDependencies.homeDirectory);
+  const stats = new FooterStats();
   let activeController: RepositoryMetadataController | undefined;
   let activeCustomController: CustomStatusController | undefined;
   let statusLineConfig: StatusLineConfig = createDefaultStatusLineConfig();
@@ -185,6 +206,7 @@ export function createStatusExtension(
   return {
     async onSessionStart(_event, context) {
       if (context.mode !== "tui") return;
+      stats.onSessionStart(context);
       await reloadConfig(context, false);
       context.ui.setFooter((tui, _theme, footerData) => {
         const renderFooterNow = () => tui.requestRender();
@@ -223,11 +245,28 @@ export function createStatusExtension(
         return {
           invalidate() {},
           render(width) {
-            const percent = context.getContextUsage()?.percent;
+            const usage = context.getContextUsage();
+            const percent = usage?.percent;
+            const contextWindow = usage?.contextWindow ?? context.model?.contextWindow ?? undefined;
+            const contextTokens = usage?.tokens ?? undefined;
+            const statsSnapshot = stats.snapshot();
             return renderFooter(
               {
                 modelName: context.model?.name || context.model?.id || "no model",
                 contextPercent: percent === null ? undefined : percent,
+                contextWindow,
+                contextTokens,
+                sessionName: statsSnapshot.sessionName ?? undefined,
+                turnCount: statsSnapshot.turnCount,
+                liveSpeed: statsSnapshot.liveSpeed ?? undefined,
+                cost: statsSnapshot.cost,
+                tokensIn: statsSnapshot.tokensIn,
+                tokensOut: statsSnapshot.tokensOut,
+                cacheRead: statsSnapshot.cacheRead,
+                cacheWrite: statsSnapshot.cacheWrite,
+                activeToolName: statsSnapshot.activeToolName ?? undefined,
+                cwd: context.cwd,
+                homeDirectory: homedir(),
                 repository: controller.metadata,
                 statuses: footerData.getExtensionStatuses(),
                 customOutputs: customController.outputs,
@@ -269,6 +308,41 @@ export function createStatusExtension(
         return;
       }
       context.ui.notify("Usage: /jpi-status [status|refresh|reload]", "warning");
+    },
+
+    onSessionInfoChanged(event) {
+      stats.onSessionInfoChanged(event);
+      requestFooterRender?.();
+    },
+
+    onTurnEnd() {
+      stats.onTurnEnd();
+      requestFooterRender?.();
+    },
+
+    onMessageStart(event) {
+      stats.onMessageStart(event);
+    },
+
+    onMessageUpdate(event) {
+      // Pi already repaints while an assistant message streams, so this
+      // updates the sampled speed without requesting a render of its own.
+      stats.onMessageUpdate(event);
+    },
+
+    onMessageEnd(event) {
+      stats.onMessageEnd(event);
+      requestFooterRender?.();
+    },
+
+    onToolExecutionStart(event) {
+      stats.onToolExecutionStart(event);
+      requestFooterRender?.();
+    },
+
+    onToolExecutionEnd() {
+      stats.onToolExecutionEnd();
+      requestFooterRender?.();
     },
   };
 }

@@ -20,6 +20,19 @@ export type WidthHelpers = {
 export type FooterSnapshot = {
   modelName: string;
   contextPercent?: number;
+  contextWindow?: number;
+  contextTokens?: number;
+  sessionName?: string;
+  turnCount?: number;
+  liveSpeed?: number;
+  cost?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  activeToolName?: string;
+  cwd?: string;
+  homeDirectory?: string;
   repository: RepositoryMetadata;
   statuses: ReadonlyMap<string, string>;
   customOutputs?: ReadonlyMap<string, string>;
@@ -86,6 +99,64 @@ function formatContext(contextPercent?: number): string | undefined {
   return color(contextColor(rounded), `ctx ${rounded}%`);
 }
 
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1000) return `${Math.round(value / 1000)}k`;
+  return String(value);
+}
+
+function label(text: string): string {
+  return `${DIM}${text}${RESET}`;
+}
+
+function formatSessionName(sessionName?: string): string | undefined {
+  return sessionName || undefined;
+}
+
+function formatContextTotal(contextWindow?: number): string | undefined {
+  return contextWindow === undefined ? undefined : label(`max ${formatCount(contextWindow)}`);
+}
+
+function formatContextUsed(contextTokens?: number): string | undefined {
+  return contextTokens === undefined ? undefined : label(`used ${formatCount(contextTokens)}`);
+}
+
+function formatContextRemaining(
+  contextWindow?: number,
+  contextTokens?: number,
+): string | undefined {
+  if (contextWindow === undefined || contextTokens === undefined) return undefined;
+  return label(`left ${formatCount(Math.max(0, contextWindow - contextTokens))}`);
+}
+
+function formatTurns(turnCount?: number): string {
+  return label(`turns ${turnCount ?? 0}`);
+}
+
+function formatSpeed(liveSpeed?: number): string | undefined {
+  return liveSpeed === undefined ? undefined : label(`${liveSpeed} tok/s`);
+}
+
+function formatCost(cost?: number): string {
+  return label(`$${(cost ?? 0).toFixed(3)}`);
+}
+
+function formatTokens(prefix: string, tokens?: number): string {
+  return label(`${prefix} ${formatCount(tokens ?? 0)}`);
+}
+
+function formatDirectory(cwd?: string, homeDirectory?: string): string | undefined {
+  if (!cwd) return undefined;
+  if (homeDirectory && (cwd === homeDirectory || cwd.startsWith(`${homeDirectory}/`))) {
+    return `~${cwd.slice(homeDirectory.length)}`;
+  }
+  return cwd;
+}
+
+function formatTool(activeToolName?: string): string | undefined {
+  return activeToolName ? `${label("tool")} ${activeToolName}` : undefined;
+}
+
 export function formatModelLine(modelName: string, contextPercent?: number): string {
   return joinSegments([formatModel(modelName), formatContext(contextPercent)])!;
 }
@@ -126,6 +197,36 @@ function formatLocalComponent(
       return repository.stack
         ? `${DIM}stack ${repository.stack.position}/${repository.stack.total}${RESET}`
         : undefined;
+    case "@jpi/name":
+      return formatSessionName(snapshot.sessionName);
+    case "@jpi/ctx-total":
+      return formatContextTotal(snapshot.contextWindow);
+    case "@jpi/ctx-used":
+      return formatContextUsed(snapshot.contextTokens);
+    case "@jpi/ctx-remaining":
+      return formatContextRemaining(snapshot.contextWindow, snapshot.contextTokens);
+    case "@jpi/turns":
+      return formatTurns(snapshot.turnCount);
+    case "@jpi/speed":
+      return formatSpeed(snapshot.liveSpeed);
+    case "@jpi/cost":
+      return formatCost(snapshot.cost);
+    case "@jpi/tokens-in":
+      return formatTokens("in", snapshot.tokensIn);
+    case "@jpi/tokens-out":
+      return formatTokens("out", snapshot.tokensOut);
+    case "@jpi/tokens-total":
+      return formatTokens(
+        "total",
+        (snapshot.tokensIn ?? 0) +
+          (snapshot.tokensOut ?? 0) +
+          (snapshot.cacheRead ?? 0) +
+          (snapshot.cacheWrite ?? 0),
+      );
+    case "@jpi/directory":
+      return formatDirectory(snapshot.cwd, snapshot.homeDirectory);
+    case "@jpi/tool":
+      return formatTool(snapshot.activeToolName);
   }
 }
 
