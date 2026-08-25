@@ -7,6 +7,9 @@ export default function jpiStatus(pi: ExtensionAPI) {
   const extension = createStatusExtension(
     (command, args, options) => pi.exec(command, args, options),
     { truncateToWidth, visibleWidth },
+    { setInterval, clearInterval },
+    {},
+    pi.events,
   );
 
   pi.on("session_start", extension.onSessionStart);

@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 
+import type { EventBus } from "@earendil-works/pi-coding-agent";
+
 import {
   createDefaultStatusLineConfig,
   createStatusConfig,
@@ -12,6 +14,12 @@ import {
   type IntervalScheduler,
 } from "./custom.ts";
 import { loadRepositoryMetadata, type ExecCommand, type RepositoryMetadata } from "./data.ts";
+import {
+  FLEET_CONSUMER_READY_CHANNEL,
+  FLEET_PROVIDER_CHANNEL,
+  isFleetProviderPayload,
+  type FleetProviderPayload,
+} from "./fleet-bridge.ts";
 import { renderFooter, type WidthHelpers } from "./render.ts";
 import {
   FooterStats,
@@ -162,11 +170,15 @@ export class RepositoryMetadataController {
   }
 }
 
+/** Used when no event bus is supplied — the footer then behaves as if jpi-subagents were never installed. */
+const noopEventBus: EventBus = { on: () => () => {}, emit: () => {} };
+
 export function createStatusExtension(
   exec: ExecCommand,
   helpers: WidthHelpers,
   scheduler: Scheduler = { setInterval, clearInterval },
   configDependencies: StatusConfigDependencies = {},
+  events: EventBus = noopEventBus,
 ): StatusExtension {
   const statusConfig = createStatusConfig(configDependencies.env, configDependencies.homeDirectory);
   const stats = new FooterStats();
@@ -208,8 +220,17 @@ export function createStatusExtension(
       if (context.mode !== "tui") return;
       stats.onSessionStart(context);
       await reloadConfig(context, false);
-      context.ui.setFooter((tui, _theme, footerData) => {
+      context.ui.setFooter((tui, theme, footerData) => {
         const renderFooterNow = () => tui.requestRender();
+        let fleetProvider: FleetProviderPayload | undefined;
+        let fleetDetach: (() => void) | undefined;
+        const unsubscribeFleetProvider = events.on(FLEET_PROVIDER_CHANNEL, (data) => {
+          if (!isFleetProviderPayload(data)) return;
+          fleetDetach?.();
+          fleetProvider = data;
+          fleetDetach = data.attach({ requestRender: renderFooterNow });
+        });
+        events.emit(FLEET_CONSUMER_READY_CHANNEL, { schema: "subagents.fleet.consumer-ready.v1" });
         let controller: RepositoryMetadataController;
         controller = new RepositoryMetadataController({
           exec,
@@ -250,7 +271,7 @@ export function createStatusExtension(
             const contextWindow = usage?.contextWindow ?? context.model?.contextWindow ?? undefined;
             const contextTokens = usage?.tokens ?? undefined;
             const statsSnapshot = stats.snapshot();
-            return renderFooter(
+            const statusRows = renderFooter(
               {
                 modelName: context.model?.name || context.model?.id || "no model",
                 contextPercent: percent === null ? undefined : percent,
@@ -275,8 +296,20 @@ export function createStatusExtension(
               width,
               helpers,
             );
+            let fleetRows: string[] = [];
+            if (fleetProvider) {
+              try {
+                fleetRows = fleetProvider.render(width, theme);
+              } catch {
+                // A broken provider costs only its own rows, never the footer.
+                fleetRows = [];
+              }
+            }
+            return [...statusRows, ...fleetRows];
           },
           dispose: () => {
+            unsubscribeFleetProvider();
+            fleetDetach?.();
             customController.dispose();
             if (activeCustomController === customController) activeCustomController = undefined;
             controller.dispose();

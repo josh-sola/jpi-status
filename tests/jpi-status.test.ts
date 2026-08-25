@@ -33,6 +33,11 @@ import {
   RepositoryMetadataController,
 } from "../extensions/jpi-status/extension.ts";
 import {
+  FLEET_CONSUMER_READY_CHANNEL,
+  FLEET_PROVIDER_CHANNEL,
+  type FleetProviderPayload,
+} from "../extensions/jpi-status/fleet-bridge.ts";
+import {
   DEFAULT_STATUS_LINE_FORMAT,
   type StatusLineFormat,
 } from "../extensions/jpi-status/layout.ts";
@@ -123,6 +128,29 @@ function ok(stdout = ""): ExecResult {
 async function tempEnv(): Promise<{ PI_CODING_AGENT_DIR: string }> {
   const directory = await mkdtemp(join(tmpdir(), "jpi-status-config-"));
   return { PI_CODING_AGENT_DIR: directory };
+}
+
+/** In-process event bus test double, matching pi's `EventBus` (`on`/`emit`). */
+function fakeEventBus() {
+  const listeners = new Map<string, Set<(data: unknown) => void>>();
+  const emitted: Array<{ channel: string; data: unknown }> = [];
+  return {
+    emitted,
+    listenerCount(channel: string): number {
+      return listeners.get(channel)?.size ?? 0;
+    },
+    on(channel: string, handler: (data: unknown) => void): () => void {
+      if (!listeners.has(channel)) listeners.set(channel, new Set());
+      listeners.get(channel)!.add(handler);
+      return () => {
+        listeners.get(channel)?.delete(handler);
+      };
+    },
+    emit(channel: string, data: unknown): void {
+      emitted.push({ channel, data });
+      for (const handler of listeners.get(channel) ?? []) handler(data);
+    },
+  };
 }
 
 const inertScheduler: IntervalScheduler = {
@@ -1459,4 +1487,126 @@ test("footer stats sample generation speed over a rolling window and clear it at
 
   stats.onMessageEnd({ message: { role: "assistant", usage: { input: 1, output: 60 } } });
   assert.equal(stats.snapshot().liveSpeed, null);
+});
+
+async function fleetFooterHarness(events: ReturnType<typeof fakeEventBus>) {
+  const env = await tempEnv();
+  const config = createStatusConfig(env);
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "@jpi/model"', "  }", "}"].join("\n"),
+    "utf8",
+  );
+
+  let footerFactory: FooterFactory | undefined;
+  const extension = createStatusExtension(
+    async () => ({ ...ok(), code: 1 }),
+    widthHelpers,
+    inertScheduler,
+    { env },
+    events,
+  );
+  const context: FooterContext = {
+    mode: "tui",
+    cwd: "/repo",
+    model: { name: "Test model" },
+    getContextUsage: () => undefined,
+    ui: {
+      setFooter(value) {
+        footerFactory = value;
+      },
+      notify() {},
+    },
+  };
+
+  await extension.onSessionStart({}, context);
+  assert.ok(footerFactory);
+  return footerFactory;
+}
+
+test("jpi-subagents fleet lines render below the status rows, with width and theme passed through", async () => {
+  const events = fakeEventBus();
+  const footerFactory = await fleetFooterHarness(events);
+  const theme = { name: "dark-theme" };
+  const component = footerFactory({ requestRender() {} }, theme, {
+    getExtensionStatuses: () => new Map(),
+    onBranchChange: () => () => {},
+  });
+
+  assert.ok(
+    events.emitted.some(({ channel }) => channel === FLEET_CONSUMER_READY_CHANNEL),
+    "announces consumer readiness once the footer is installed",
+  );
+
+  let received: { width: number; theme: unknown } | undefined;
+  const providerPayload: FleetProviderPayload = {
+    schema: "subagents.fleet.provider.v1",
+    render(width, receivedTheme) {
+      received = { width, theme: receivedTheme };
+      return ["fleet row"];
+    },
+    attach: () => () => {},
+  };
+  events.emit(FLEET_PROVIDER_CHANNEL, providerPayload);
+
+  assert.deepEqual(component.render(80).map(plain), [" Test model", "fleet row"]);
+  assert.deepEqual(received, { width: 80, theme });
+  component.dispose();
+});
+
+test("with no fleet provider attached, the footer renders exactly as it did before", async () => {
+  const footerFactory = await fleetFooterHarness(fakeEventBus());
+  const component = footerFactory(
+    { requestRender() {} },
+    {},
+    { getExtensionStatuses: () => new Map(), onBranchChange: () => () => {} },
+  );
+
+  assert.deepEqual(component.render(80).map(plain), [" Test model"]);
+  component.dispose();
+});
+
+test("a throwing fleet provider costs only its own rows, not the footer", async () => {
+  const events = fakeEventBus();
+  const footerFactory = await fleetFooterHarness(events);
+  const component = footerFactory(
+    { requestRender() {} },
+    {},
+    { getExtensionStatuses: () => new Map(), onBranchChange: () => () => {} },
+  );
+
+  events.emit(FLEET_PROVIDER_CHANNEL, {
+    schema: "subagents.fleet.provider.v1",
+    render: () => {
+      throw new Error("boom");
+    },
+    attach: () => () => {},
+  } satisfies FleetProviderPayload);
+
+  assert.deepEqual(component.render(80).map(plain), [" Test model"]);
+  component.dispose();
+});
+
+test("disposing the footer detaches the fleet provider and unsubscribes", async () => {
+  const events = fakeEventBus();
+  const footerFactory = await fleetFooterHarness(events);
+  const component = footerFactory(
+    { requestRender() {} },
+    {},
+    { getExtensionStatuses: () => new Map(), onBranchChange: () => () => {} },
+  );
+
+  let detached = false;
+  events.emit(FLEET_PROVIDER_CHANNEL, {
+    schema: "subagents.fleet.provider.v1",
+    render: () => ["fleet row"],
+    attach: () => () => {
+      detached = true;
+    },
+  } satisfies FleetProviderPayload);
+  assert.equal(events.listenerCount(FLEET_PROVIDER_CHANNEL), 1);
+
+  component.dispose();
+  assert.equal(detached, true);
+  assert.equal(events.listenerCount(FLEET_PROVIDER_CHANNEL), 0);
 });

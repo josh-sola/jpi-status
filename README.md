@@ -108,6 +108,10 @@ whitespace-only output hides the component; a timeout, error, or nonzero
 exit also hides it. Errors and nonzero exits warn once, until the next
 success or config reload; timeouts stay silent.
 
+### Fleet lines from jpi-subagents
+
+When [jpi-subagents](https://github.com/josh-sola/jpi-subagents) is installed, its FleetView (the running-agent list) renders below the status rows here instead of as its own below-editor widget. jpi-subagents hands this extension a render function over the `pi.events` bus (`subagents:fleet:provider:v1`); this footer answers with `subagents:fleet:consumer-ready:v1` once it is listening, so the handshake works whichever extension loads first. Without jpi-subagents, the footer looks exactly as it does today.
+
 ### Commands
 
 - `/jpi-status status` — reports whether the footer is active.
