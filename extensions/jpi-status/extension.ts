@@ -32,18 +32,24 @@ type FooterContext = {
   };
   thinkingLevel?: string;
   isIdle?(): boolean;
-  getContextUsage(): {
-    tokens?: number | null;
-    contextWindow?: number | null;
-    percent: number | null;
-  } | undefined;
+  getContextUsage():
+    | {
+        tokens?: number | null;
+        contextWindow?: number | null;
+        percent: number | null;
+      }
+    | undefined;
   ui: {
     notify(message: string, level?: "info" | "warning" | "error"): void;
-    setFooter(factory: ((
-      tui: { requestRender(): void },
-      theme: unknown,
-      footerData: FooterData,
-    ) => { render(width: number): string[]; invalidate(): void; dispose(): void }) | undefined): void;
+    setFooter(
+      factory:
+        | ((
+            tui: { requestRender(): void },
+            theme: unknown,
+            footerData: FooterData,
+          ) => { render(width: number): string[]; invalidate(): void; dispose(): void })
+        | undefined,
+    ): void;
   };
 };
 
@@ -198,11 +204,12 @@ export function createStatusExtension(
           exec,
           format: statusLineConfig.format,
           configPath: statusConfig.path,
-          getPayload: () => createCustomStatusPayload(
-            context,
-            controller.metadata,
-            footerData.getExtensionStatuses(),
-          ),
+          getPayload: () =>
+            createCustomStatusPayload(
+              context,
+              controller.metadata,
+              footerData.getExtensionStatuses(),
+            ),
           requestRender: renderFooterNow,
           notify: (message, level) => context.ui.notify(message, level),
           scheduler,
@@ -217,14 +224,18 @@ export function createStatusExtension(
           invalidate() {},
           render(width) {
             const percent = context.getContextUsage()?.percent;
-            return renderFooter({
-              modelName: context.model?.name || context.model?.id || "no model",
-              contextPercent: percent === null ? undefined : percent,
-              repository: controller.metadata,
-              statuses: footerData.getExtensionStatuses(),
-              customOutputs: customController.outputs,
-              config: statusLineConfig,
-            }, width, helpers);
+            return renderFooter(
+              {
+                modelName: context.model?.name || context.model?.id || "no model",
+                contextPercent: percent === null ? undefined : percent,
+                repository: controller.metadata,
+                statuses: footerData.getExtensionStatuses(),
+                customOutputs: customController.outputs,
+                config: statusLineConfig,
+              },
+              width,
+              helpers,
+            );
           },
           dispose: () => {
             customController.dispose();

@@ -34,18 +34,18 @@ status {
 
 Each `row` is one footer line, given as positional component IDs. The footer
 drops unavailable components and lines that end up empty, and it joins the
-components on a line with ` · `. The built-in component IDs are:
+components on a line with `·`. The built-in component IDs are:
 
-| ID | Content |
-| --- | --- |
-| `@jpi/model` | Active model name |
-| `@jpi/context` | Context-window percentage |
-| `@jpi/repository` | Repository name |
-| `@jpi/worktree` | Linked `wt` tree name |
-| `@jpi/branch` | Shortened branch name |
-| `@jpi/pull-request` | Graphite pull request and draft state |
-| `@jpi/stack` | Graphite stack position |
-| `@jpi/slot` | Published extension statuses, sorted by status ID |
+| ID                  | Content                                           |
+| ------------------- | ------------------------------------------------- |
+| `@jpi/model`        | Active model name                                 |
+| `@jpi/context`      | Context-window percentage                         |
+| `@jpi/repository`   | Repository name                                   |
+| `@jpi/worktree`     | Linked `wt` tree name                             |
+| `@jpi/branch`       | Shortened branch name                             |
+| `@jpi/pull-request` | Graphite pull request and draft state             |
+| `@jpi/stack`        | Graphite stack position                           |
+| `@jpi/slot`         | Published extension statuses, sorted by status ID |
 
 Any other component ID is an exact, case-sensitive extension status ID, such
 as `auto-review`. A missing extension status is left out until that

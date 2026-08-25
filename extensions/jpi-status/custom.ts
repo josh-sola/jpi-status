@@ -48,11 +48,13 @@ export type CustomPayloadContext = {
   };
   thinkingLevel?: string;
   isIdle?(): boolean;
-  getContextUsage(): {
-    tokens?: number | null;
-    contextWindow?: number | null;
-    percent?: number | null;
-  } | undefined;
+  getContextUsage():
+    | {
+        tokens?: number | null;
+        contextWindow?: number | null;
+        percent?: number | null;
+      }
+    | undefined;
 };
 
 export type IntervalScheduler = {
@@ -65,8 +67,10 @@ export function customOccurrenceKey(lineIndex: number, componentIndex: number): 
 }
 
 export function isCustomComponentId(componentId: string): boolean {
-  return componentId.startsWith(CUSTOM_COMPONENT_PREFIX)
-    && componentId.slice(CUSTOM_COMPONENT_PREFIX.length).trim() !== "";
+  return (
+    componentId.startsWith(CUSTOM_COMPONENT_PREFIX) &&
+    componentId.slice(CUSTOM_COMPONENT_PREFIX.length).trim() !== ""
+  );
 }
 
 export function resolveCustomExecutable(componentId: string, configPath: string): string {
@@ -154,7 +158,10 @@ type ActiveRun = {
 };
 
 function concise(text: string): string {
-  const singleLine = text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+  const singleLine = text
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/ +/g, " ")
+    .trim();
   return singleLine.length > 160 ? `${singleLine.slice(0, 159)}…` : singleLine;
 }
 
@@ -166,7 +173,9 @@ function resultFailure(result: Awaited<ReturnType<ExecCommand>>): string | undef
       : `timed out after ${CUSTOM_COMMAND_TIMEOUT_MS}ms`;
   }
   if (result.code !== 0) {
-    return detail ? `exited with code ${result.code}: ${detail}` : `exited with code ${result.code}`;
+    return detail
+      ? `exited with code ${result.code}: ${detail}`
+      : `exited with code ${result.code}`;
   }
   return undefined;
 }
@@ -196,7 +205,10 @@ export class CustomStatusController {
   get outputs(): ReadonlyMap<string, string> {
     return new Map(
       [...this.states.entries()]
-        .filter((entry): entry is [string, CustomOccurrenceState & { output: string }] => entry[1].output !== undefined)
+        .filter(
+          (entry): entry is [string, CustomOccurrenceState & { output: string }] =>
+            entry[1].output !== undefined,
+        )
         .map(([key, state]) => [key, state.output]),
     );
   }
@@ -273,27 +285,29 @@ export class CustomStatusController {
     const occurrences = this.occurrences;
     const payload = this.options.getPayload();
     const argument = JSON.stringify(payload);
-    await Promise.all(occurrences.map(async (occurrence) => {
-      try {
-        const result = await this.options.exec(occurrence.path, [argument], {
-          cwd: payload.cwd ?? undefined,
-          timeout: CUSTOM_COMMAND_TIMEOUT_MS,
-          signal: run.abortController.signal,
-        });
-        if (!this.isCurrent(run)) return;
-        const failure = resultFailure(result);
-        if (failure) {
-          this.recordFailure(occurrence, failure);
-          return;
+    await Promise.all(
+      occurrences.map(async (occurrence) => {
+        try {
+          const result = await this.options.exec(occurrence.path, [argument], {
+            cwd: payload.cwd ?? undefined,
+            timeout: CUSTOM_COMMAND_TIMEOUT_MS,
+            signal: run.abortController.signal,
+          });
+          if (!this.isCurrent(run)) return;
+          const failure = resultFailure(result);
+          if (failure) {
+            this.recordFailure(occurrence, failure);
+            return;
+          }
+          const state = this.states.get(occurrence.key);
+          if (!state) return;
+          state.output = result.stdout.trim() === "" ? undefined : result.stdout;
+          state.failure = undefined;
+        } catch (error) {
+          if (this.isCurrent(run)) this.recordFailure(occurrence, thrownFailure(error));
         }
-        const state = this.states.get(occurrence.key);
-        if (!state) return;
-        state.output = result.stdout.trim() === "" ? undefined : result.stdout;
-        state.failure = undefined;
-      } catch (error) {
-        if (this.isCurrent(run)) this.recordFailure(occurrence, thrownFailure(error));
-      }
-    }));
+      }),
+    );
 
     if (this.isCurrent(run)) this.options.requestRender();
   }

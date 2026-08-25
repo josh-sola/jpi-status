@@ -2,17 +2,20 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test } from "vite-plus/test";
 
 import {
   createDefaultStatusLineConfig,
   createStatusConfig,
   loadStatusLineConfig,
+  type StatusLineConfig,
 } from "../extensions/jpi-status/config.ts";
 import {
   createCustomStatusPayload,
   CustomStatusController,
   getCustomOccurrences,
+  type CustomStatusPayload,
+  type IntervalScheduler,
 } from "../extensions/jpi-status/custom.ts";
 import {
   calculateStackPosition,
@@ -23,25 +26,82 @@ import {
   stringHash,
   shortenBranch,
   worktreeColor,
+  type ExecCommand,
 } from "../extensions/jpi-status/data.ts";
-import { createStatusExtension, RepositoryMetadataController } from "../extensions/jpi-status/extension.ts";
-import { DEFAULT_STATUS_LINE_FORMAT } from "../extensions/jpi-status/layout.ts";
+import {
+  createStatusExtension,
+  RepositoryMetadataController,
+} from "../extensions/jpi-status/extension.ts";
+import {
+  DEFAULT_STATUS_LINE_FORMAT,
+  type StatusLineFormat,
+} from "../extensions/jpi-status/layout.ts";
 import {
   formatModelLine,
   formatPullRequest,
   formatRepositoryLine,
   formatStatuses,
   renderFooter,
+  type WidthHelpers,
 } from "../extensions/jpi-status/render.ts";
 
 const CSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OSC_PATTERN = /\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
 
-function plain(text) {
+// Mirrors extension.ts's un-exported FooterContext/FooterData/factory shapes so
+// the test doubles below get real parameter types instead of implicit any.
+type NotifyLevel = "info" | "warning" | "error";
+type Notification = { message: string; level?: NotifyLevel };
+
+type FooterData = {
+  getExtensionStatuses(): ReadonlyMap<string, string>;
+  onBranchChange(callback: () => void): () => void;
+};
+type FooterComponent = { render(width: number): string[]; invalidate(): void; dispose(): void };
+type FooterFactory = (
+  tui: { requestRender(): void },
+  theme: unknown,
+  footerData: FooterData,
+) => FooterComponent;
+type FooterContext = {
+  mode: string;
+  cwd: string;
+  model?: {
+    id?: string;
+    name?: string;
+    provider?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+  };
+  thinkingLevel?: string;
+  isIdle?(): boolean;
+  getContextUsage():
+    | { tokens?: number | null; contextWindow?: number | null; percent: number | null }
+    | undefined;
+  ui: {
+    notify(message: string, level?: NotifyLevel): void;
+    setFooter(factory: FooterFactory | undefined): void;
+  };
+};
+
+type ExecOptions = { cwd?: string; timeout?: number; signal?: AbortSignal };
+type ExecResult = Awaited<ReturnType<ExecCommand>>;
+type ExecCall = { command: string; args: string[]; options?: ExecOptions };
+type FakeTimer = { callback: () => void; delay: number };
+type RawStackEntry = {
+  branch: string;
+  parent?: string | null;
+  current: boolean;
+  prNumber?: number | null;
+  prDraft: boolean;
+};
+
+function plain(text: string): string {
   return text.replace(OSC_PATTERN, "").replace(CSI_PATTERN, "");
 }
 
-const widthHelpers = {
+const widthHelpers: WidthHelpers = {
   visibleWidth: (text) => plain(text).length,
   truncateToWidth(text, width, ellipsis = "...") {
     const visible = plain(text);
@@ -51,44 +111,44 @@ const widthHelpers = {
   },
 };
 
-function stackJson(entries) {
+function stackJson(entries: readonly RawStackEntry[]): string {
   return JSON.stringify({ available: true, stacks: [{ entries }] });
 }
 
-function ok(stdout = "") {
+function ok(stdout = ""): ExecResult {
   return { stdout, stderr: "", code: 0, killed: false };
 }
 
-async function tempEnv() {
+async function tempEnv(): Promise<{ PI_CODING_AGENT_DIR: string }> {
   const directory = await mkdtemp(join(tmpdir(), "jpi-status-config-"));
   return { PI_CODING_AGENT_DIR: directory };
 }
 
-const inertScheduler = {
-  setInterval() {
-    return {};
+const inertScheduler: IntervalScheduler = {
+  setInterval(): ReturnType<typeof setInterval> {
+    return {} as unknown as ReturnType<typeof setInterval>;
   },
-  clearInterval() {},
+  clearInterval(): void {},
 };
 
-function manualScheduler() {
-  const timers = [];
-  const cleared = [];
+function manualScheduler(): IntervalScheduler & { timers: FakeTimer[]; cleared: FakeTimer[] } {
+  const timers: FakeTimer[] = [];
+  const cleared: FakeTimer[] = [];
   return {
     timers,
     cleared,
-    setInterval(callback, delay) {
-      const timer = { callback, delay };
+    setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval> {
+      const timer: FakeTimer = { callback, delay };
       timers.push(timer);
-      return timer;
+      return timer as unknown as ReturnType<typeof setInterval>;
     },
-    clearInterval(timer) {
-      cleared.push(timer);
+    clearInterval(timer: ReturnType<typeof setInterval>): void {
+      cleared.push(timer as unknown as FakeTimer);
     },
   };
 }
 
-function customPayload(cwd = "/repo") {
+function customPayload(cwd = "/repo"): CustomStatusPayload {
   return {
     cwd,
     idle: true,
@@ -100,7 +160,10 @@ function customPayload(cwd = "/repo") {
   };
 }
 
-function statusLineConfig(format = DEFAULT_STATUS_LINE_FORMAT, disabledStatuses = []) {
+function statusLineConfig(
+  format: StatusLineFormat = DEFAULT_STATUS_LINE_FORMAT,
+  disabledStatuses: readonly string[] = [],
+): StatusLineConfig {
   return { format, disabledStatuses: new Set(disabledStatuses) };
 }
 
@@ -122,7 +185,10 @@ test("loading with no jpi.kdl file writes the live-default stanza and decodes cl
 
   const text = await readFile(config.path, "utf8");
   assert.match(text, /status \{/);
-  assert.match(text, /row "@jpi\/model" "@jpi\/context" "@jpi\/repository" "@jpi\/worktree" "@jpi\/branch" "@jpi\/pull-request" "@jpi\/stack"/);
+  assert.match(
+    text,
+    /row "@jpi\/model" "@jpi\/context" "@jpi\/repository" "@jpi\/worktree" "@jpi\/branch" "@jpi\/pull-request" "@jpi\/stack"/,
+  );
   assert.match(text, /row "@jpi\/slot"/);
 });
 
@@ -146,10 +212,7 @@ test("a hand-written status section decodes rows and disabled statuses", async (
   const result = await loadStatusLineConfig(config);
   assert.equal(result.problem, undefined);
   assert.deepEqual(result.issues, []);
-  assert.deepEqual(result.config.format, [
-    ["@jpi/model", "@jpi/branch"],
-    ["@custom:bin/status"],
-  ]);
+  assert.deepEqual(result.config.format, [["@jpi/model", "@jpi/branch"], ["@custom:bin/status"]]);
   assert.deepEqual([...result.config.disabledStatuses], ["auto-review"]);
 });
 
@@ -193,7 +256,7 @@ test("an unknown @jpi/ component warns and falls back to the full default, disca
   );
 
   const result = await loadStatusLineConfig(config);
-  assert.match(result.problem, /unknown reserved ID @jpi\/modle/);
+  assert.match(result.problem!, /unknown reserved ID @jpi\/modle/);
   assert.deepEqual(result.config.format, DEFAULT_STATUS_LINE_FORMAT);
   assert.deepEqual([...result.config.disabledStatuses], []);
 });
@@ -208,16 +271,16 @@ test("a blank @custom: path warns and falls back to the full default", async () 
   );
 
   const result = await loadStatusLineConfig(config);
-  assert.match(result.problem, /blank @custom: path/);
+  assert.match(result.problem!, /blank @custom: path/);
   assert.deepEqual(result.config.format, DEFAULT_STATUS_LINE_FORMAT);
   assert.deepEqual([...result.config.disabledStatuses], []);
 });
 
 test("custom executable paths resolve from root or the config directory by occurrence", () => {
-  const occurrences = getCustomOccurrences([
-    ["@custom:/opt/status", "extension", "@custom:bin/status"],
-    ["@custom:bin/status"],
-  ], "/Users/tester/.pi/agent/jpi.kdl");
+  const occurrences = getCustomOccurrences(
+    [["@custom:/opt/status", "extension", "@custom:bin/status"], ["@custom:bin/status"]],
+    "/Users/tester/.pi/agent/jpi.kdl",
+  );
 
   assert.deepEqual(occurrences, [
     {
@@ -250,24 +313,28 @@ test("custom payloads expose exact current harness, repository, and sorted statu
     branch: "feature",
     pullRequest: { number: 42, draft: false },
   };
-  const payload = createCustomStatusPayload({
-    cwd: "/repo",
-    isIdle: () => false,
-    thinkingLevel: "high",
-    model: {
-      id: "model-id",
-      name: "Model Name",
-      provider: "provider-id",
-      reasoning: true,
-      contextWindow: 200_000,
-      maxTokens: 32_000,
+  const payload = createCustomStatusPayload(
+    {
+      cwd: "/repo",
+      isIdle: () => false,
+      thinkingLevel: "high",
+      model: {
+        id: "model-id",
+        name: "Model Name",
+        provider: "provider-id",
+        reasoning: true,
+        contextWindow: 200_000,
+        maxTokens: 32_000,
+      },
+      getContextUsage: () => ({ tokens: 75_000, contextWindow: 200_000, percent: 37.5 }),
     },
-    getContextUsage: () => ({ tokens: 75_000, contextWindow: 200_000, percent: 37.5 }),
-  }, repository, new Map([
-    ["z-status", "last"],
-    ["disabled-status", "still included"],
-    ["a-status", "first"],
-  ]));
+    repository,
+    new Map([
+      ["z-status", "last"],
+      ["disabled-status", "still included"],
+      ["a-status", "first"],
+    ]),
+  );
 
   assert.deepEqual(payload, {
     cwd: "/repo",
@@ -291,21 +358,35 @@ test("custom payloads expose exact current harness, repository, and sorted statu
   });
   assert.deepEqual(Object.keys(payload.statuses), ["a-status", "disabled-status", "z-status"]);
 
-  assert.deepEqual(createCustomStatusPayload({
-    getContextUsage: () => undefined,
-  }, {}, new Map()), {
-    cwd: null,
-    idle: null,
-    model: null,
-    thinkingLevel: null,
-    context: { tokens: null, contextWindow: null, percent: null },
-    repository: {},
-    statuses: {},
-  });
-  assert.equal(createCustomStatusPayload({
-    model: { contextWindow: 128_000 },
-    getContextUsage: () => undefined,
-  }, {}, new Map()).context.contextWindow, 128_000);
+  assert.deepEqual(
+    createCustomStatusPayload(
+      {
+        getContextUsage: () => undefined,
+      },
+      {},
+      new Map(),
+    ),
+    {
+      cwd: null,
+      idle: null,
+      model: null,
+      thinkingLevel: null,
+      context: { tokens: null, contextWindow: null, percent: null },
+      repository: {},
+      statuses: {},
+    },
+  );
+  assert.equal(
+    createCustomStatusPayload(
+      {
+        model: { contextWindow: 128_000 },
+        getContextUsage: () => undefined,
+      },
+      {},
+      new Map(),
+    ).context.contextWindow,
+    128_000,
+  );
 });
 
 test("branch display matches the Claude status line and deduplicates wt names", () => {
@@ -326,9 +407,12 @@ test("worktree colors use a stable string hash", () => {
 
 test("repository segments have no orphan separators", () => {
   assert.equal(formatRepositoryLine({}), undefined);
-  assert.equal(plain(formatRepositoryLine({ repo: "jrepo", branch: "feature" })), "jrepo · feature");
   assert.equal(
-    plain(formatRepositoryLine({ worktree: { name: "Status footer", color: 39 } })),
+    plain(formatRepositoryLine({ repo: "jrepo", branch: "feature" })!),
+    "jrepo · feature",
+  );
+  assert.equal(
+    plain(formatRepositoryLine({ worktree: { name: "Status footer", color: 39 } })!),
     "Status footer",
   );
 });
@@ -344,22 +428,32 @@ test("stack position uses depth and the longest branch from the first stacked br
 
   assert.deepEqual(calculateStackPosition(entries, "b"), { position: 2, total: 3 });
   assert.deepEqual(
-    calculateStackPosition(entries.map((entry) => ({ ...entry, current: entry.branch === "a" })), "a"),
+    calculateStackPosition(
+      entries.map((entry) => ({ ...entry, current: entry.branch === "a" })),
+      "a",
+    ),
     { position: 1, total: 3 },
   );
   assert.equal(calculateStackPosition(entries.slice(0, 2), "a"), undefined);
   assert.equal(
-    calculateStackPosition(entries.map((entry) => ({ ...entry, current: entry.branch === "main" })), "main"),
+    calculateStackPosition(
+      entries.map((entry) => ({ ...entry, current: entry.branch === "main" })),
+      "main",
+    ),
     undefined,
   );
 });
 
 test("stack parsing uses the current entry for PR and Graphite link data", () => {
-  const parsed = parseStackMetadata(stackJson([
-    { branch: "main", parent: null, current: false, prNumber: null, prDraft: false },
-    { branch: "feature", parent: "main", current: true, prNumber: 42, prDraft: true },
-    { branch: "next", parent: "feature", current: false, prNumber: 43, prDraft: false },
-  ]), "feature", "git@github.com:josh-sola/jrepo.git");
+  const parsed = parseStackMetadata(
+    stackJson([
+      { branch: "main", parent: null, current: false, prNumber: null, prDraft: false },
+      { branch: "feature", parent: "main", current: true, prNumber: 42, prDraft: true },
+      { branch: "next", parent: "feature", current: false, prNumber: 43, prDraft: false },
+    ]),
+    "feature",
+    "git@github.com:josh-sola/jrepo.git",
+  );
 
   assert.deepEqual(parsed.pullRequest, {
     number: 42,
@@ -368,14 +462,20 @@ test("stack parsing uses the current entry for PR and Graphite link data", () =>
   });
   assert.deepEqual(parsed.stack, { position: 1, total: 2 });
 
-  const nonGitHub = parseStackMetadata(stackJson([
-    { branch: "feature", parent: null, current: true, prNumber: 7, prDraft: false },
-  ]), "feature", "ssh://git@example.com/team/repo.git");
-  assert.equal(nonGitHub.pullRequest.url, undefined);
+  const nonGitHub = parseStackMetadata(
+    stackJson([{ branch: "feature", parent: null, current: true, prNumber: 7, prDraft: false }]),
+    "feature",
+    "ssh://git@example.com/team/repo.git",
+  );
+  assert.equal(nonGitHub.pullRequest!.url, undefined);
 });
 
 test("PR formatting keeps draft styling inside a valid OSC 8 link", () => {
-  const rendered = formatPullRequest({ number: 42, draft: true, url: "https://example.test/pr/42" });
+  const rendered = formatPullRequest({
+    number: 42,
+    draft: true,
+    url: "https://example.test/pr/42",
+  });
   assert.equal(plain(rendered), "#42 draft");
   assert.match(rendered, /^\x1b\]8;;https:\/\/example\.test\/pr\/42\x1b\\/);
   assert.match(rendered, /\x1b\]8;;\x1b\\$/);
@@ -390,10 +490,13 @@ test("extension statuses are sorted and sanitized without stripping ANSI", () =>
   ]);
   const rendered = formatStatuses(statuses);
 
-  assert.equal(plain(rendered), "first value · green ready");
-  assert.match(rendered, /\x1b\[38;5;108mgreen\x1b\[0m/);
-  assert.equal(plain(formatStatuses(statuses, new Set(["a-status"]))), "green ready");
-  assert.equal(plain(formatStatuses(statuses, new Set(["A-status"]))), "first value · green ready");
+  assert.equal(plain(rendered!), "first value · green ready");
+  assert.match(rendered!, /\x1b\[38;5;108mgreen\x1b\[0m/);
+  assert.equal(plain(formatStatuses(statuses, new Set(["a-status"]))!), "green ready");
+  assert.equal(
+    plain(formatStatuses(statuses, new Set(["A-status"]))!),
+    "first value · green ready",
+  );
 });
 
 test("model and context lines use the approved colors and thresholds", () => {
@@ -404,22 +507,26 @@ test("model and context lines use the approved colors and thresholds", () => {
 });
 
 test("configured local components render in line and component order", () => {
-  const lines = renderFooter({
-    modelName: "GPT-5.6 Sol",
-    contextPercent: 51,
-    repository: {
-      repo: "jrepo",
-      worktree: { name: "Status footer", color: 39 },
-      branch: "feature",
-      pullRequest: { number: 42, draft: true },
-      stack: { position: 2, total: 4 },
+  const lines = renderFooter(
+    {
+      modelName: "GPT-5.6 Sol",
+      contextPercent: 51,
+      repository: {
+        repo: "jrepo",
+        worktree: { name: "Status footer", color: 39 },
+        branch: "feature",
+        pullRequest: { number: 42, draft: true },
+        stack: { position: 2, total: 4 },
+      },
+      statuses: new Map(),
+      config: statusLineConfig([
+        ["@jpi/stack", "@jpi/pull-request", "@jpi/branch"],
+        ["@jpi/worktree", "@jpi/repository", "@jpi/context", "@jpi/model"],
+      ]),
     },
-    statuses: new Map(),
-    config: statusLineConfig([
-      ["@jpi/stack", "@jpi/pull-request", "@jpi/branch"],
-      ["@jpi/worktree", "@jpi/repository", "@jpi/context", "@jpi/model"],
-    ]),
-  }, 120, widthHelpers);
+    120,
+    widthHelpers,
+  );
 
   assert.deepEqual(lines.map(plain), [
     " stack 2/4 · #42 draft · feature",
@@ -437,57 +544,81 @@ test("extension IDs and slots follow configured filtering and duplication", () =
       ["empty", "\n\t"],
     ]),
   };
-  const filtered = renderFooter({
-    ...snapshot,
-    config: statusLineConfig([
-      ["auto-review", "missing-status", "@jpi/slot"],
-      ["@jpi/slot", "auto-review"],
-      [],
-      ["missing-status"],
-    ], ["auto-review"]),
-  }, 120, widthHelpers);
-  assert.deepEqual(filtered.map(plain), [
-    " review on · z ready",
-    " z ready · review on",
-  ]);
+  const filtered = renderFooter(
+    {
+      ...snapshot,
+      config: statusLineConfig(
+        [
+          ["auto-review", "missing-status", "@jpi/slot"],
+          ["@jpi/slot", "auto-review"],
+          [],
+          ["missing-status"],
+        ],
+        ["auto-review"],
+      ),
+    },
+    120,
+    widthHelpers,
+  );
+  assert.deepEqual(filtered.map(plain), [" review on · z ready", " z ready · review on"]);
 
-  const duplicated = renderFooter({
-    ...snapshot,
-    config: statusLineConfig([["auto-review", "@jpi/slot", "auto-review"]]),
-  }, 120, widthHelpers);
-  assert.deepEqual(duplicated.map(plain), [
-    " review on · review on · z ready · review on",
-  ]);
-  assert.deepEqual(renderFooter({
-    ...snapshot,
-    config: statusLineConfig([]),
-  }, 120, widthHelpers), []);
+  const duplicated = renderFooter(
+    {
+      ...snapshot,
+      config: statusLineConfig([["auto-review", "@jpi/slot", "auto-review"]]),
+    },
+    120,
+    widthHelpers,
+  );
+  assert.deepEqual(duplicated.map(plain), [" review on · review on · z ready · review on"]);
+  assert.deepEqual(
+    renderFooter(
+      {
+        ...snapshot,
+        config: statusLineConfig([]),
+      },
+      120,
+      widthHelpers,
+    ),
+    [],
+  );
 });
 
 test("every rendered footer line starts with a space and respects narrow widths", () => {
-  const lines = renderFooter({
-    modelName: "A very long model display name",
-    contextPercent: 83,
-    repository: {
-      repo: "jrepo",
-      worktree: { name: "A long friendly worktree name", color: 39 },
-      branch: "long-feature-branch",
-      pullRequest: { number: 42, draft: false, url: "https://example.test/pr/42" },
-      stack: { position: 2, total: 4 },
+  const lines = renderFooter(
+    {
+      modelName: "A very long model display name",
+      contextPercent: 83,
+      repository: {
+        repo: "jrepo",
+        worktree: { name: "A long friendly worktree name", color: 39 },
+        branch: "long-feature-branch",
+        pullRequest: { number: 42, draft: false, url: "https://example.test/pr/42" },
+        stack: { position: 2, total: 4 },
+      },
+      statuses: new Map([["status", "a long extension status"]]),
+      config: statusLineConfig(),
     },
-    statuses: new Map([["status", "a long extension status"]]),
-    config: statusLineConfig(),
-  }, 12, widthHelpers);
+    12,
+    widthHelpers,
+  );
 
   assert.equal(lines.length, 2);
   assert.ok(lines.every((line) => plain(line).startsWith(" ")));
   assert.ok(lines.every((line) => widthHelpers.visibleWidth(line) <= 12));
-  assert.deepEqual(renderFooter({
-    modelName: "Model",
-    repository: {},
-    statuses: new Map(),
-    config: statusLineConfig([["@jpi/model"]]),
-  }, 0, widthHelpers), []);
+  assert.deepEqual(
+    renderFooter(
+      {
+        modelName: "Model",
+        repository: {},
+        statuses: new Map(),
+        config: statusLineConfig([["@jpi/model"]]),
+      },
+      0,
+      widthHelpers,
+    ),
+    [],
+  );
 });
 
 test("custom outputs render by occurrence with sanitization, joining, omission, and width fitting", () => {
@@ -511,27 +642,32 @@ test("custom outputs render by occurrence with sanitization, joining, omission, 
     " first value · extension value",
     " a very long custom value",
   ]);
-  assert.ok(renderFooter(snapshot, 9, widthHelpers).every(
-    (line) => plain(line).startsWith(" ") && widthHelpers.visibleWidth(line) <= 9,
-  ));
+  assert.ok(
+    renderFooter(snapshot, 9, widthHelpers).every(
+      (line) => plain(line).startsWith(" ") && widthHelpers.visibleWidth(line) <= 9,
+    ),
+  );
 });
 
 test("custom commands start immediately, run duplicates concurrently, and use one periodic timer", async () => {
   const scheduler = manualScheduler();
-  const calls = [];
-  const pending = [];
+  const calls: ExecCall[] = [];
+  const pending: Array<(value: ExecResult) => void> = [];
   let payloadVersion = 1;
   let renderRequests = 0;
-  const exec = (command, args, options) => new Promise((resolve) => {
-    calls.push({ command, args, options });
-    pending.push(resolve);
-  });
+  const exec: ExecCommand = (command, args, options) =>
+    new Promise((resolve) => {
+      calls.push({ command, args, options });
+      pending.push(resolve);
+    });
   const controller = new CustomStatusController({
     exec,
     format: [["@custom:bin/status", "@custom:bin/status"]],
     configPath: "/config/jpi.kdl",
     getPayload: () => ({ ...customPayload(), statuses: { version: String(payloadVersion) } }),
-    requestRender: () => { renderRequests += 1; },
+    requestRender: () => {
+      renderRequests += 1;
+    },
     notify() {},
     scheduler,
   });
@@ -539,31 +675,34 @@ test("custom commands start immediately, run duplicates concurrently, and use on
   const started = controller.start();
   assert.equal(calls.length, 2);
   assert.equal(scheduler.timers.length, 1);
-  assert.equal(scheduler.timers[0].delay, 10_000);
+  assert.equal(scheduler.timers[0]!.delay, 10_000);
   assert.ok(calls.every((call) => call.command === "/config/bin/status"));
   assert.ok(calls.every((call) => call.args.length === 1));
-  assert.ok(calls.every((call) => call.options.cwd === "/repo"));
-  assert.ok(calls.every((call) => call.options.timeout === 3_000));
-  assert.ok(calls.every((call) => call.options.signal instanceof AbortSignal));
-  assert.deepEqual(JSON.parse(calls[0].args[0]).statuses, { version: "1" });
+  assert.ok(calls.every((call) => call.options?.cwd === "/repo"));
+  assert.ok(calls.every((call) => call.options?.timeout === 3_000));
+  assert.ok(calls.every((call) => call.options?.signal instanceof AbortSignal));
+  assert.deepEqual(JSON.parse(calls[0]!.args[0]!).statuses, { version: "1" });
 
   payloadVersion = 2;
-  scheduler.timers[0].callback();
-  scheduler.timers[0].callback();
+  scheduler.timers[0]!.callback();
+  scheduler.timers[0]!.callback();
   assert.equal(calls.length, 2);
-  pending[0](ok("old first"));
-  pending[1](ok("old second"));
+  pending[0]!(ok("old first"));
+  pending[1]!(ok("old second"));
   await started;
   assert.equal(calls.length, 4);
-  assert.deepEqual(JSON.parse(calls[2].args[0]).statuses, { version: "2" });
-  pending[2](ok("new first\nvalue"));
-  pending[3](ok("new second"));
+  assert.deepEqual(JSON.parse(calls[2]!.args[0]!).statuses, { version: "2" });
+  pending[2]!(ok("new first\nvalue"));
+  pending[3]!(ok("new second"));
   await new Promise(setImmediate);
 
-  assert.deepEqual([...controller.outputs], [
-    ["0:0", "new first\nvalue"],
-    ["0:1", "new second"],
-  ]);
+  assert.deepEqual(
+    [...controller.outputs],
+    [
+      ["0:0", "new first\nvalue"],
+      ["0:1", "new second"],
+    ],
+  );
   assert.equal(renderRequests, 2);
   controller.dispose();
   assert.deepEqual(scheduler.cleared, [scheduler.timers[0]]);
@@ -571,8 +710,8 @@ test("custom commands start immediately, run duplicates concurrently, and use on
 
 test("custom failures hide output and suppress warnings until reason, success, or config changes", async () => {
   const scheduler = manualScheduler();
-  const notifications = [];
-  const responses = [
+  const notifications: Array<{ message: string; level: "warning" }> = [];
+  const responses: Array<ExecResult | Error> = [
     ok("visible"),
     { ...ok(), code: 7, stderr: " denied\nnow " },
     { ...ok(), code: 7, stderr: " denied\nnow " },
@@ -584,7 +723,7 @@ test("custom failures hide output and suppress warnings until reason, success, o
   ];
   const controller = new CustomStatusController({
     exec: async () => {
-      const response = responses.shift();
+      const response = responses.shift()!;
       if (response instanceof Error) throw response;
       return response;
     },
@@ -601,15 +740,15 @@ test("custom failures hide output and suppress warnings until reason, success, o
   await controller.refresh();
   assert.equal(controller.outputs.size, 0);
   assert.equal(notifications.length, 1);
-  assert.match(notifications[0].message, /@custom:status.*format\[0\]\[0\].*code 7: denied now/);
+  assert.match(notifications[0]!.message, /@custom:status.*format\[0\]\[0\].*code 7: denied now/);
   await controller.refresh();
   assert.equal(notifications.length, 1);
   await controller.refresh();
   assert.equal(notifications.length, 2);
-  assert.match(notifications[1].message, /could not run: permission denied/);
+  assert.match(notifications[1]!.message, /could not run: permission denied/);
   await controller.refresh();
   assert.equal(notifications.length, 3);
-  assert.match(notifications[2].message, /timed out after 3000ms/);
+  assert.match(notifications[2]!.message, /timed out after 3000ms/);
   await controller.refresh();
   assert.equal(controller.outputs.size, 0);
   await controller.refresh();
@@ -622,14 +761,14 @@ test("custom failures hide output and suppress warnings until reason, success, o
 
 test("disposing custom commands aborts in-flight execution and clears its timer", async () => {
   const scheduler = manualScheduler();
-  let signal;
+  let signal: AbortSignal | undefined;
   let calls = 0;
   const controller = new CustomStatusController({
     exec: (_command, _args, options) => {
       calls += 1;
-      signal = options.signal;
+      signal = options?.signal;
       return new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       });
     },
     format: [["@custom:status"]],
@@ -642,9 +781,9 @@ test("disposing custom commands aborts in-flight execution and clears its timer"
 
   const started = controller.start();
   assert.equal(calls, 1);
-  assert.equal(signal.aborted, false);
+  assert.equal(signal!.aborted, false);
   controller.dispose();
-  assert.equal(signal.aborted, true);
+  assert.equal(signal!.aborted, true);
   assert.deepEqual(scheduler.cleared, [scheduler.timers[0]]);
   await started;
   await controller.refresh();
@@ -652,8 +791,8 @@ test("disposing custom commands aborts in-flight execution and clears its timer"
 });
 
 test("metadata loading uses bounded git and wt commands and degrades optional fields", async () => {
-  const calls = [];
-  const exec = async (command, args, options) => {
+  const calls: ExecCall[] = [];
+  const exec: ExecCommand = async (command, args, options) => {
     calls.push({ command, args, options });
     const key = `${command} ${args.join(" ")}`;
     const outputs = new Map([
@@ -665,14 +804,14 @@ test("metadata loading uses bounded git and wt commands and degrades optional fi
       ["wt name --path /trees/uuid", "Pi status line\n"],
       ["wt stack --json --all-branches", stackJson([])],
     ]);
-    return outputs.has(key) ? ok(outputs.get(key)) : { ...ok(), code: 1 };
+    return outputs.has(key) ? ok(outputs.get(key)!) : { ...ok(), code: 1 };
   };
 
   const metadata = await loadRepositoryMetadata(exec, "/trees/uuid", new AbortController().signal);
   assert.equal(metadata.repo, "jrepo");
-  assert.equal(metadata.worktree.name, "Pi status line");
+  assert.equal(metadata.worktree!.name, "Pi status line");
   assert.equal(metadata.branch, undefined);
-  assert.ok(calls.every((call) => call.options.timeout === 3_000));
+  assert.ok(calls.every((call) => call.options?.timeout === 3_000));
   assert.ok(calls.some((call) => call.command === "wt" && call.args[0] === "stack"));
 });
 
@@ -681,18 +820,25 @@ test("the extension loads the status config before installing the footer", async
   const config = createStatusConfig(env);
   await writeFile(
     config.path,
-    ["status {", "  format {", '    row "other" "@jpi/model"', "  }", '  disabled-statuses "auto-review"', "}"].join("\n"),
+    [
+      "status {",
+      "  format {",
+      '    row "other" "@jpi/model"',
+      "  }",
+      '  disabled-statuses "auto-review"',
+      "}",
+    ].join("\n"),
     "utf8",
   );
 
-  let footerFactory;
+  let footerFactory: FooterFactory | undefined;
   const extension = createStatusExtension(
     async () => ({ ...ok(), code: 1 }),
     widthHelpers,
     inertScheduler,
     { env },
   );
-  const context = {
+  const context: FooterContext = {
     mode: "tui",
     cwd: "/repo",
     model: { name: "Test model" },
@@ -707,14 +853,20 @@ test("the extension loads the status config before installing the footer", async
 
   await extension.onSessionStart({}, context);
   assert.equal(typeof footerFactory, "function");
+  assert.ok(footerFactory);
 
-  const component = footerFactory({ requestRender() {} }, {}, {
-    getExtensionStatuses: () => new Map([
-      ["auto-review", "review: enabled"],
-      ["other", "syncing"],
-    ]),
-    onBranchChange: () => () => {},
-  });
+  const component = footerFactory(
+    { requestRender() {} },
+    {},
+    {
+      getExtensionStatuses: () =>
+        new Map([
+          ["auto-review", "review: enabled"],
+          ["other", "syncing"],
+        ]),
+      onBranchChange: () => () => {},
+    },
+  );
   assert.deepEqual(component.render(80).map(plain), [" syncing · Test model"]);
   component.dispose();
 });
@@ -736,16 +888,16 @@ test("reloading status config rerenders valid and fail-default changes", async (
     "utf8",
   );
 
-  let footerFactory;
+  let footerFactory: FooterFactory | undefined;
   let renderRequests = 0;
-  const notifications = [];
+  const notifications: Notification[] = [];
   const extension = createStatusExtension(
     async () => ({ ...ok(), code: 1 }),
     widthHelpers,
     inertScheduler,
     { env },
   );
-  const context = {
+  const context: FooterContext = {
     mode: "tui",
     cwd: "/repo",
     model: { name: "Test model" },
@@ -761,22 +913,32 @@ test("reloading status config rerenders valid and fail-default changes", async (
   };
 
   await extension.onSessionStart({}, context);
-  const component = footerFactory({
-    requestRender() {
-      renderRequests += 1;
+  assert.ok(footerFactory);
+  const component = footerFactory(
+    {
+      requestRender() {
+        renderRequests += 1;
+      },
     },
-  }, {}, {
-    getExtensionStatuses: () => new Map([
-      ["hidden", "hidden"],
-      ["visible", "shown"],
-    ]),
-    onBranchChange: () => () => {},
-  });
+    {},
+    {
+      getExtensionStatuses: () =>
+        new Map([
+          ["hidden", "hidden"],
+          ["visible", "shown"],
+        ]),
+      onBranchChange: () => () => {},
+    },
+  );
   await new Promise(setImmediate);
   renderRequests = 0;
   assert.deepEqual(component.render(80).map(plain), [" Test model", " shown"]);
 
-  await writeFile(config.path, ["status {", "  format {", '    row "visible" "@jpi/model"', "  }", "}"].join("\n"), "utf8");
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "visible" "@jpi/model"', "  }", "}"].join("\n"),
+    "utf8",
+  );
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 1);
   assert.deepEqual(component.render(80).map(plain), [" shown · Test model"]);
@@ -806,18 +968,22 @@ test("reloading status config rerenders valid and fail-default changes", async (
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 3);
   assert.deepEqual(component.render(80).map(plain), [" Test model", " hidden · shown"]);
-  assert.equal(notifications.at(-1).level, "warning");
-  assert.match(notifications.at(-1).message, /has issues:/);
-  assert.match(notifications.at(-1).message, /could not parse jpi\.kdl/);
+  assert.equal(notifications.at(-1)!.level, "warning");
+  assert.match(notifications.at(-1)!.message, /has issues:/);
+  assert.match(notifications.at(-1)!.message, /could not parse jpi\.kdl/);
 
-  await writeFile(config.path, ["status {", "  format {", '    row "@jpi/modle"', "  }", "}"].join("\n"), "utf8");
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "@jpi/modle"', "  }", "}"].join("\n"),
+    "utf8",
+  );
   await extension.onCommand("reload", context);
   assert.equal(renderRequests, 4);
   assert.deepEqual(component.render(80).map(plain), [" Test model", " hidden · shown"]);
-  assert.equal(notifications.at(-1).level, "warning");
-  assert.match(notifications.at(-1).message, /Could not load jpi-status config/);
-  assert.match(notifications.at(-1).message, /unknown reserved ID @jpi\/modle/);
-  assert.match(notifications.at(-1).message, /Using the default config\.$/);
+  assert.equal(notifications.at(-1)!.level, "warning");
+  assert.match(notifications.at(-1)!.message, /Could not load jpi-status config/);
+  assert.match(notifications.at(-1)!.message, /unknown reserved ID @jpi\/modle/);
+  assert.match(notifications.at(-1)!.message, /Using the default config\.$/);
   component.dispose();
 });
 
@@ -826,19 +992,23 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
   const config = createStatusConfig(env);
   const oldPath = join(env.PI_CODING_AGENT_DIR, "old");
   const newPath = join(env.PI_CODING_AGENT_DIR, "new");
-  await writeFile(config.path, ["status {", "  format {", '    row "@custom:old"', "  }", "}"].join("\n"), "utf8");
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "@custom:old"', "  }", "}"].join("\n"),
+    "utf8",
+  );
 
-  let footerFactory;
-  let oldSignal;
-  let newCall;
+  let footerFactory: FooterFactory | undefined;
+  let oldSignal: AbortSignal | undefined;
+  let newCall: ExecCall | undefined;
   let renderRequests = 0;
   const scheduler = manualScheduler();
-  const notifications = [];
-  const exec = async (command, args, options) => {
+  const notifications: Notification[] = [];
+  const exec: ExecCommand = async (command, args, options) => {
     if (command === oldPath) {
-      oldSignal = options.signal;
+      oldSignal = options?.signal;
       return new Promise((_resolve, reject) => {
-        oldSignal.addEventListener("abort", () => reject(new Error("stale")), { once: true });
+        oldSignal!.addEventListener("abort", () => reject(new Error("stale")), { once: true });
       });
     }
     if (command === newPath) {
@@ -848,7 +1018,7 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
     return { ...ok(), code: 1 };
   };
   const extension = createStatusExtension(exec, widthHelpers, scheduler, { env });
-  const context = {
+  const context: FooterContext = {
     mode: "tui",
     cwd: "/repo",
     model: { name: "Test model" },
@@ -864,22 +1034,31 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
   };
 
   await extension.onSessionStart({}, context);
-  const component = footerFactory({
-    requestRender() {
-      renderRequests += 1;
+  assert.ok(footerFactory);
+  const component = footerFactory(
+    {
+      requestRender() {
+        renderRequests += 1;
+      },
     },
-  }, {}, {
-    getExtensionStatuses: () => new Map([["disabled", "included in payload"]]),
-    onBranchChange: () => () => {},
-  });
-  assert.equal(oldSignal.aborted, false);
+    {},
+    {
+      getExtensionStatuses: () => new Map([["disabled", "included in payload"]]),
+      onBranchChange: () => () => {},
+    },
+  );
+  assert.equal(oldSignal!.aborted, false);
   assert.deepEqual(component.render(80), []);
 
-  await writeFile(config.path, ["status {", "  format {", '    row "@custom:new"', "  }", "}"].join("\n"), "utf8");
+  await writeFile(
+    config.path,
+    ["status {", "  format {", '    row "@custom:new"', "  }", "}"].join("\n"),
+    "utf8",
+  );
   await extension.onCommand("reload", context);
-  assert.equal(oldSignal.aborted, true);
-  assert.equal(newCall.command, newPath);
-  assert.deepEqual(JSON.parse(newCall.args[0]).statuses, { disabled: "included in payload" });
+  assert.equal(oldSignal!.aborted, true);
+  assert.equal(newCall!.command, newPath);
+  assert.deepEqual(JSON.parse(newCall!.args[0]!).statuses, { disabled: "included in payload" });
   assert.deepEqual(component.render(80).map(plain), [" new output"]);
   assert.ok(renderRequests >= 2);
   assert.deepEqual(notifications.at(-1), {
@@ -892,22 +1071,22 @@ test("reloading config aborts stale custom runs and immediately rebuilds occurre
 });
 
 test("the extension installs only in TUI mode and cleans up component resources", async () => {
-  let footerFactory;
-  let branchCallback;
+  let footerFactory: FooterFactory | undefined;
+  let branchCallback: (() => void) | undefined;
   let unsubscribed = false;
-  let clearedTimer;
-  const notifications = [];
-  const footerValues = [];
-  const scheduler = {
+  let clearedTimer: ReturnType<typeof setInterval> | undefined;
+  const notifications: Notification[] = [];
+  const footerValues: Array<FooterFactory | undefined> = [];
+  const scheduler: IntervalScheduler = {
     setInterval(callback, delay) {
       assert.equal(delay, 10_000);
-      return { callback };
+      return { callback } as unknown as ReturnType<typeof setInterval>;
     },
     clearInterval(timer) {
       clearedTimer = timer;
     },
   };
-  const exec = async (command, args) => {
+  const exec: ExecCommand = async (command, args) => {
     const key = `${command} ${args.join(" ")}`;
     const outputs = new Map([
       ["git rev-parse --show-toplevel", "/repo\n"],
@@ -917,11 +1096,11 @@ test("the extension installs only in TUI mode and cleans up component resources"
       ["git remote get-url origin", "git@github.com:owner/repo.git\n"],
       ["wt stack --json --all-branches", stackJson([])],
     ]);
-    return outputs.has(key) ? ok(outputs.get(key)) : { ...ok(), code: 1 };
+    return outputs.has(key) ? ok(outputs.get(key)!) : { ...ok(), code: 1 };
   };
   const env = await tempEnv();
   const extension = createStatusExtension(exec, widthHelpers, scheduler, { env });
-  const context = {
+  const context: FooterContext = {
     mode: "json",
     cwd: "/repo",
     model: { name: "Test model" },
@@ -938,19 +1117,26 @@ test("the extension installs only in TUI mode and cleans up component resources"
   };
 
   await extension.onSessionStart({}, context);
-  assert.equal(footerFactory, undefined);
+  assert.equal(typeof footerFactory, "undefined");
   context.mode = "tui";
   await extension.onSessionStart({}, context);
   assert.equal(typeof footerFactory, "function");
   assert.equal(footerValues.includes(undefined), false);
+  assert.ok(footerFactory);
 
-  const component = footerFactory({ requestRender() {} }, {}, {
-    getExtensionStatuses: () => new Map([["review", "review: enabled"]]),
-    onBranchChange(callback) {
-      branchCallback = callback;
-      return () => { unsubscribed = true; };
+  const component = footerFactory(
+    { requestRender() {} },
+    {},
+    {
+      getExtensionStatuses: () => new Map([["review", "review: enabled"]]),
+      onBranchChange(callback) {
+        branchCallback = callback;
+        return () => {
+          unsubscribed = true;
+        };
+      },
     },
-  });
+  );
   await new Promise(setImmediate);
   assert.deepEqual(component.render(80).map(plain), [
     " Test model · ctx 12% · repo · main",
@@ -959,21 +1145,23 @@ test("the extension installs only in TUI mode and cleans up component resources"
   assert.equal(typeof branchCallback, "function");
 
   await extension.onCommand("status", context);
-  assert.equal(notifications.at(-1).message, "jpi-status footer is active.");
+  assert.equal(notifications.at(-1)!.message, "jpi-status footer is active.");
   component.dispose();
   assert.equal(unsubscribed, true);
   assert.ok(clearedTimer);
   await extension.onCommand("status", context);
-  assert.equal(notifications.at(-1).message, "jpi-status footer is not active.");
+  assert.equal(notifications.at(-1)!.message, "jpi-status footer is not active.");
   assert.equal(footerValues.includes(undefined), false);
 });
 
 test("metadata refreshes are single-flight and stale generations are not published", async () => {
-  let releaseFirstStack;
-  const firstStack = new Promise((resolve) => { releaseFirstStack = resolve; });
+  let releaseFirstStack: ((value: ExecResult) => void) | undefined;
+  const firstStack: Promise<ExecResult> = new Promise((resolve) => {
+    releaseFirstStack = resolve;
+  });
   let stackCalls = 0;
   let renderRequests = 0;
-  const exec = async (command, args) => {
+  const exec: ExecCommand = async (command, args) => {
     const key = `${command} ${args.join(" ")}`;
     if (key === "wt stack --json --all-branches") {
       stackCalls += 1;
@@ -987,14 +1175,19 @@ test("metadata refreshes are single-flight and stale generations are not publish
       ["git branch --show-current", "main\n"],
       ["git remote get-url origin", "git@github.com:owner/repo.git\n"],
     ]);
-    return outputs.has(key) ? ok(outputs.get(key)) : { ...ok(), code: 1 };
+    return outputs.has(key) ? ok(outputs.get(key)!) : { ...ok(), code: 1 };
   };
   const controller = new RepositoryMetadataController({
     exec,
     cwd: "/repo",
-    requestRender: () => { renderRequests += 1; },
+    requestRender: () => {
+      renderRequests += 1;
+    },
     onBranchChange: () => () => {},
-    scheduler: { setInterval: () => ({ id: 1 }), clearInterval() {} },
+    scheduler: {
+      setInterval: () => ({ id: 1 }) as unknown as ReturnType<typeof setInterval>,
+      clearInterval() {},
+    },
     onDispose() {},
   });
 
@@ -1003,7 +1196,7 @@ test("metadata refreshes are single-flight and stale generations are not publish
   assert.equal(stackCalls, 1);
   const refreshed = controller.refresh();
   assert.equal(stackCalls, 1);
-  releaseFirstStack(ok(stackJson([])));
+  releaseFirstStack!(ok(stackJson([])));
   await refreshed;
   assert.equal(stackCalls, 2);
   assert.equal(renderRequests, 1);

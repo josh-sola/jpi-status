@@ -1,18 +1,11 @@
 import { Config, j } from "jpi-base";
 
 import { CUSTOM_COMPONENT_PREFIX, isCustomComponentId } from "./custom.ts";
-import {
-  DEFAULT_STATUS_LINE_FORMAT,
-  isJpiComponentId,
-  type StatusLineFormat,
-} from "./layout.ts";
+import { DEFAULT_STATUS_LINE_FORMAT, isJpiComponentId, type StatusLineFormat } from "./layout.ts";
 
 const row = j.node({
   attrs: {
-    components: j
-      .array(j.string())
-      .describe("component ids, left to right")
-      .default([]),
+    components: j.array(j.string()).describe("component ids, left to right").default([]),
   },
 });
 

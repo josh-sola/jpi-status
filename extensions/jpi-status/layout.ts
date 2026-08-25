@@ -9,7 +9,7 @@ export const JPI_COMPONENT_IDS = [
   "@jpi/slot",
 ] as const;
 
-export type JpiComponentId = typeof JPI_COMPONENT_IDS[number];
+export type JpiComponentId = (typeof JPI_COMPONENT_IDS)[number];
 export type StatusLineFormat = readonly (readonly string[])[];
 
 const JPI_COMPONENT_ID_SET: ReadonlySet<string> = new Set(JPI_COMPONENT_IDS);

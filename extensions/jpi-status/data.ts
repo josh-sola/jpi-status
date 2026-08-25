@@ -1,4 +1,6 @@
-const WORKTREE_PALETTE = [39, 208, 46, 141, 226, 51, 207, 196, 118, 214, 213, 45, 99, 220, 82, 159] as const;
+const WORKTREE_PALETTE = [
+  39, 208, 46, 141, 226, 51, 207, 196, 118, 214, 213, 45, 99, 220, 82, 159,
+] as const;
 const COMMAND_TIMEOUT_MS = 3_000;
 const SHORT_OUTPUT_LIMIT = 4_096;
 const STACK_OUTPUT_LIMIT = 256 * 1_024;
@@ -77,7 +79,11 @@ export function shortenBranch(branch: string): string {
 }
 
 export function semanticallyEqual(left: string, right: string): boolean {
-  const normalize = (value: string) => value.trim().toLowerCase().replace(/[\s_-]+/g, "");
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
   return normalize(left) === normalize(right);
 }
 
@@ -107,12 +113,18 @@ function parseOrigin(origin: string): ParsedOrigin {
     }
   }
 
-  const parts = path.replace(/\.git$/i, "").split("/").filter(Boolean);
+  const parts = path
+    .replace(/\.git$/i, "")
+    .split("/")
+    .filter(Boolean);
   if (parts.length < 2) return { host };
   return { host: host?.toLowerCase(), owner: parts[0], repo: parts[1] };
 }
 
-export function graphitePullRequestUrl(origin: string, pullRequestNumber: number): string | undefined {
+export function graphitePullRequestUrl(
+  origin: string,
+  pullRequestNumber: number,
+): string | undefined {
   const parsed = parseOrigin(origin);
   if (parsed.host !== "github.com" || !parsed.owner || !parsed.repo) return undefined;
   return `https://app.graphite.com/github/pr/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${pullRequestNumber}`;
@@ -125,14 +137,21 @@ function parseStackEntries(raw: unknown): StackEntry[] {
   for (const stack of raw.stacks) {
     if (!isRecord(stack) || !Array.isArray(stack.entries)) continue;
     for (const candidate of stack.entries) {
-      if (!isRecord(candidate) || typeof candidate.branch !== "string" || candidate.branch === "") continue;
+      if (!isRecord(candidate) || typeof candidate.branch !== "string" || candidate.branch === "")
+        continue;
       entries.push({
         branch: candidate.branch,
-        parent: typeof candidate.parent === "string" && candidate.parent !== "" ? candidate.parent : undefined,
+        parent:
+          typeof candidate.parent === "string" && candidate.parent !== ""
+            ? candidate.parent
+            : undefined,
         current: candidate.current === true,
-        prNumber: typeof candidate.prNumber === "number" && Number.isInteger(candidate.prNumber) && candidate.prNumber > 0
-          ? candidate.prNumber
-          : undefined,
+        prNumber:
+          typeof candidate.prNumber === "number" &&
+          Number.isInteger(candidate.prNumber) &&
+          candidate.prNumber > 0
+            ? candidate.prNumber
+            : undefined,
         prDraft: candidate.prDraft === true,
       });
     }
@@ -140,7 +159,10 @@ function parseStackEntries(raw: unknown): StackEntry[] {
   return entries;
 }
 
-function longestDescendantChain(root: string, children: ReadonlyMap<string, string[]>): number | undefined {
+function longestDescendantChain(
+  root: string,
+  children: ReadonlyMap<string, string[]>,
+): number | undefined {
   function visit(branch: string, path: ReadonlySet<string>): number | undefined {
     if (path.has(branch) || path.size >= 50) return undefined;
     const nextPath = new Set(path).add(branch);
@@ -156,9 +178,13 @@ function longestDescendantChain(root: string, children: ReadonlyMap<string, stri
   return visit(root, new Set());
 }
 
-export function calculateStackPosition(entries: readonly StackEntry[], currentBranch?: string): StackPosition | undefined {
-  const current = entries.find((entry) => entry.current)
-    ?? entries.find((entry) => entry.branch === currentBranch);
+export function calculateStackPosition(
+  entries: readonly StackEntry[],
+  currentBranch?: string,
+): StackPosition | undefined {
+  const current =
+    entries.find((entry) => entry.current) ??
+    entries.find((entry) => entry.branch === currentBranch);
   if (!current) return undefined;
 
   const byBranch = new Map(entries.map((entry) => [entry.branch, entry]));
@@ -205,8 +231,9 @@ export function parseStackMetadata(
   }
 
   const entries = parseStackEntries(parsed);
-  const current = entries.find((entry) => entry.current)
-    ?? entries.find((entry) => entry.branch === currentBranch);
+  const current =
+    entries.find((entry) => entry.current) ??
+    entries.find((entry) => entry.branch === currentBranch);
   const pullRequest = current?.prNumber
     ? {
         number: current.prNumber,
@@ -263,19 +290,26 @@ export async function loadRepositoryMetadata(
   ]);
 
   if (!topLevel || !gitDir || !commonGitDir) return {};
-  const branch = namedBranch || await run(exec, "git", ["rev-parse", "--short", "HEAD"], cwd, signal);
+  const branch =
+    namedBranch || (await run(exec, "git", ["rev-parse", "--short", "HEAD"], cwd, signal));
   const linkedWorktree = gitDir !== commonGitDir;
   const [friendlyName, stackJson] = await Promise.all([
-    linkedWorktree ? run(exec, "wt", ["name", "--path", topLevel], topLevel, signal) : Promise.resolve(undefined),
+    linkedWorktree
+      ? run(exec, "wt", ["name", "--path", topLevel], topLevel, signal)
+      : Promise.resolve(undefined),
     run(exec, "wt", ["stack", "--json", "--all-branches"], topLevel, signal, STACK_OUTPUT_LIMIT),
   ]);
 
   const stackMetadata = stackJson ? parseStackMetadata(stackJson, namedBranch, origin ?? "") : {};
   const worktreeIdentifier = basename(topLevel);
-  const normalizedFriendlyName = friendlyName?.replace(/[\r\n\t]+/g, " ").replace(/ +/g, " ").trim();
-  const worktree = linkedWorktree && normalizedFriendlyName
-    ? { name: normalizedFriendlyName, color: worktreeColor(worktreeIdentifier) }
-    : undefined;
+  const normalizedFriendlyName = friendlyName
+    ?.replace(/[\r\n\t]+/g, " ")
+    .replace(/ +/g, " ")
+    .trim();
+  const worktree =
+    linkedWorktree && normalizedFriendlyName
+      ? { name: normalizedFriendlyName, color: worktreeColor(worktreeIdentifier) }
+      : undefined;
 
   return {
     repo: repoName(origin ?? "", commonGitDir, topLevel),

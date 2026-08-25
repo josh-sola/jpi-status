@@ -42,7 +42,10 @@ function joinSegments(segments: Array<string | undefined>): string | undefined {
 }
 
 export function sanitizeStatusText(text: string): string {
-  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+  return text
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/ +/g, " ")
+    .trim();
 }
 
 function formatStatusSegments(
@@ -93,7 +96,9 @@ export function formatRepositoryLine(repository: RepositoryMetadata): string | u
     repository.worktree ? color(repository.worktree.color, repository.worktree.name) : undefined,
     repository.branch,
     repository.pullRequest ? formatPullRequest(repository.pullRequest) : undefined,
-    repository.stack ? `${DIM}stack ${repository.stack.position}/${repository.stack.total}${RESET}` : undefined,
+    repository.stack
+      ? `${DIM}stack ${repository.stack.position}/${repository.stack.total}${RESET}`
+      : undefined,
   ]);
 }
 
@@ -140,7 +145,10 @@ function resolveComponent(
     return formatStatusSegments(snapshot.statuses, snapshot.config.disabledStatuses);
   }
   if (componentId.startsWith("@jpi/")) {
-    const value = formatLocalComponent(componentId as Exclude<JpiComponentId, "@jpi/slot">, snapshot);
+    const value = formatLocalComponent(
+      componentId as Exclude<JpiComponentId, "@jpi/slot">,
+      snapshot,
+    );
     return value ? [value] : [];
   }
 
@@ -155,19 +163,24 @@ function fitLine(line: string, width: number, helpers: WidthHelpers): string | u
   const prefixWidth = helpers.visibleWidth(LINE_PREFIX);
   if (safeWidth < prefixWidth) return undefined;
   const contentWidth = safeWidth - prefixWidth;
-  const content = helpers.visibleWidth(line) <= contentWidth
-    ? line
-    : helpers.truncateToWidth(line, contentWidth, `${DIM}...${RESET}`);
+  const content =
+    helpers.visibleWidth(line) <= contentWidth
+      ? line
+      : helpers.truncateToWidth(line, contentWidth, `${DIM}...${RESET}`);
   return `${LINE_PREFIX}${content}`;
 }
 
-export function renderFooter(snapshot: FooterSnapshot, width: number, helpers: WidthHelpers): string[] {
+export function renderFooter(
+  snapshot: FooterSnapshot,
+  width: number,
+  helpers: WidthHelpers,
+): string[] {
   const lines: string[] = [];
   for (let lineIndex = 0; lineIndex < snapshot.config.format.length; lineIndex += 1) {
     const configuredLine = snapshot.config.format[lineIndex]!;
-    const segments = configuredLine.flatMap((componentId, componentIndex) => (
-      resolveComponent(componentId, lineIndex, componentIndex, snapshot)
-    ));
+    const segments = configuredLine.flatMap((componentId, componentIndex) =>
+      resolveComponent(componentId, lineIndex, componentIndex, snapshot),
+    );
     const line = joinSegments(segments);
     if (!line) continue;
     const fittedLine = fitLine(line, width, helpers);
