@@ -1,7 +1,7 @@
 import type { StatusLineConfig } from "./config.ts";
 import { CUSTOM_COMPONENT_PREFIX, customOccurrenceKey } from "./custom.ts";
 import type { PullRequestMetadata, RepositoryMetadata } from "./data.ts";
-import type { JpiComponentId } from "./layout.ts";
+import type { JpiComponentId, StatusLineFormat } from "./layout.ts";
 
 const ESC = "\x1b[";
 const RESET = `${ESC}0m`;
@@ -230,6 +230,18 @@ function formatLocalComponent(
   }
 }
 
+function placedStatusIds(format: StatusLineFormat): Set<string> {
+  const ids = new Set<string>();
+  for (const line of format) {
+    for (const componentId of line) {
+      if (componentId.startsWith("@jpi/")) continue;
+      if (componentId.startsWith(CUSTOM_COMPONENT_PREFIX)) continue;
+      ids.add(componentId);
+    }
+  }
+  return ids;
+}
+
 function resolveComponent(
   componentId: string,
   lineIndex: number,
@@ -243,7 +255,11 @@ function resolveComponent(
     return formatted ? [formatted] : [];
   }
   if (componentId === "@jpi/slot") {
-    return formatStatusSegments(snapshot.statuses, snapshot.config.disabledStatuses);
+    const hidden = new Set([
+      ...snapshot.config.disabledStatuses,
+      ...placedStatusIds(snapshot.config.format),
+    ]);
+    return formatStatusSegments(snapshot.statuses, hidden);
   }
   if (componentId.startsWith("@jpi/")) {
     const value = formatLocalComponent(

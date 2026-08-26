@@ -65,9 +65,10 @@ extension publishes it. The `@jpi/` namespace is reserved, so an unknown ID
 in that namespace makes the config invalid.
 
 `@jpi/slot` shows every published extension status except the IDs listed in
-`disabled-statuses`. Listing a status in `disabled-statuses` only hides it
-from the slot — an explicit entry for that ID still renders, and it does not
-disable the extension that publishes it. A status can appear twice this way.
+`disabled-statuses` and the IDs placed as explicit components in a `row`.
+Placing a status renders it where you put it and drops it from the slot, so
+`disabled-statuses` is only needed to hide a status you don't place anywhere.
+Neither hiding nor placing disables the extension that publishes the status.
 Repeat the `disabled-statuses` node for more than one:
 
 ```kdl

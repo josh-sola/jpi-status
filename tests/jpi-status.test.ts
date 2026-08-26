@@ -564,7 +564,7 @@ test("configured local components render in line and component order", () => {
   ]);
 });
 
-test("extension IDs and slots follow configured filtering and duplication", () => {
+test("extension IDs render where placed and drop out of the slot", () => {
   const snapshot = {
     modelName: "Test model",
     repository: {},
@@ -600,7 +600,7 @@ test("extension IDs and slots follow configured filtering and duplication", () =
     120,
     widthHelpers,
   );
-  assert.deepEqual(duplicated.map(plain), [" review on · review on · z ready · review on"]);
+  assert.deepEqual(duplicated.map(plain), [" review on · z ready · review on"]);
   assert.deepEqual(
     renderFooter(
       {
