@@ -60,7 +60,7 @@ components on a line with `·`. The built-in component IDs are:
 | `@jpi/tool`          | Name of the currently running tool                |
 
 Any other component ID is an exact, case-sensitive extension status ID, such
-as `auto-review`. A missing extension status is left out until that
+as `@jpi-guardian/review-mode`. A missing extension status is left out until that
 extension publishes it. The `@jpi/` namespace is reserved, so an unknown ID
 in that namespace makes the config invalid.
 
@@ -73,7 +73,7 @@ Repeat the `disabled-statuses` node for more than one:
 ```kdl
 status {
   disabled-statuses "context"
-  disabled-statuses "auto-review"
+  disabled-statuses "@jpi-guardian/review-mode"
 }
 ```
 
